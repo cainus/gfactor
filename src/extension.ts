@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import * as childProcess from 'child_process';
 import { PatternOccurrence } from './utils/types';
 import { logMessage, initializeLogging, setSidebarWebview, clearLogs } from './utils/logging';
 import { collectMdcContext } from './utils/file-utils';
@@ -40,6 +41,10 @@ class GFactorSidebarProvider implements vscode.WebviewViewProvider {
         sidebarWebview = webviewView.webview;
         setSidebarWebview(webviewView.webview);
         
+        // Restore logs from extension context when webview is created
+        const context = getExtensionContext();
+        logMessages = context.globalState.get<string[]>(LOG_STORAGE_KEY) || [];
+        
         webviewView.webview.html = this._getHtmlForWebview(webviewView.webview);
 
         // Handle messages from the webview
@@ -79,6 +84,10 @@ class GFactorSidebarProvider implements vscode.WebviewViewProvider {
                 case 'logButtonState': {
                     // Log button state changes to the output channel
                     logMessage(message.message);
+                    // Also add to the in-memory log array for persistence
+                    logMessages.push(message.message);
+                    const extContext = getExtensionContext();
+                    extContext.globalState.update(LOG_STORAGE_KEY, logMessages);
                     break;
                 }
                 case 'persistLog': {
@@ -495,16 +504,18 @@ class GFactorSidebarProvider implements vscode.WebviewViewProvider {
             
             // Log button state changes
             if (isRunning) {
-                addLogMessage('Cancel button is now available');
+                const message = '🔴 CANCEL BUTTON: Showing cancel button 🔴';
+                addLogMessage(message);
                 vscode.postMessage({
                     command: 'logButtonState',
-                    message: 'Cancel button is now available'
+                    message: message
                 });
             } else {
-                addLogMessage('Cancel button is no longer available');
+                const message = '🔴 CANCEL BUTTON: Hiding cancel button 🔴';
+                addLogMessage(message);
                 vscode.postMessage({
                     command: 'logButtonState',
-                    message: 'Cancel button is no longer available'
+                    message: message
                 });
             }
         }
@@ -620,6 +631,9 @@ export function activate(context: vscode.ExtensionContext): void {
         // Select the GFactor output channel
         vscode.commands.executeCommand('workbench.output.action.switchBetweenOutputs', 'GFactor');
     });
+    
+    // Check if Claude CLI is installed
+    checkClaudeCliInstallation();
 
     // Register the commands - just focus the sidebar view
     const startRefactorCommand = vscode.commands.registerCommand('gfactor.startRefactor', async () => {
@@ -655,6 +669,9 @@ async function checkApiKeyConfiguration(_context: vscode.ExtensionContext): Prom
     const claudeApiKey = config.get<string>('claudeApiKey');
 
     if (!claudeApiKey) {
+        logMessage('⚠️ WARNING: GFactor requires an API key for Claude to function.');
+        
+        // Still show a dialog for this critical configuration
         const configureNow = 'Configure Now';
         const response = await vscode.window.showInformationMessage(
             'GFactor requires an API key for Claude to function. Would you like to configure it now?',
@@ -662,9 +679,46 @@ async function checkApiKeyConfiguration(_context: vscode.ExtensionContext): Prom
         );
 
         if (response === configureNow) {
+            logMessage('Opening API key configuration panel');
             // Show the sidebar view instead
             vscode.commands.executeCommand('workbench.view.extension.gfactor-sidebar');
         }
+    }
+}
+
+// Check if Claude CLI is installed
+async function checkClaudeCliInstallation(): Promise<void> {
+    try {
+        // Try to run 'claude -v' to check if it's installed
+        childProcess.exec('claude -v', (error: Error | null, stdout: string, _stderr: string) => {
+            if (error) {
+                // Claude CLI is not installed or not in PATH
+                logMessage('⚠️ WARNING: Claude CLI is required but not installed.');
+                
+                // Ask if the user wants to install it
+                const installButton = 'Install Claude CLI';
+                vscode.window.showInformationMessage(
+                    'Claude CLI is required but not installed.',
+                    installButton
+                ).then(selection => {
+                    if (selection === installButton) {
+                        logMessage('Installing Claude CLI via npm...');
+                        // Install Claude CLI
+                        const terminal = vscode.window.createTerminal('Claude CLI Installation');
+                        terminal.show();
+                        terminal.sendText('npm install -g @anthropic-ai/claude-code');
+                        
+                        // Log installation progress
+                        logMessage('Claude CLI installation started. Please wait for the installation to complete.');
+                    }
+                });
+            } else {
+                // Claude CLI is installed
+                logMessage(`Claude CLI is installed: ${stdout.trim()}`);
+            }
+        });
+    } catch (error) {
+        console.error('Error checking Claude CLI installation:', error);
     }
 }
 
@@ -680,13 +734,14 @@ function stopMigration(): void {
         if (sidebarWebview) {
             // Add a small delay to ensure the UI updates properly
             setTimeout(() => {
+                logMessage('🔴 CANCEL BUTTON: Migration stopped, hiding cancel button 🔴');
                 sidebarWebview?.postMessage({
                     command: 'migrationComplete'
                 });
             }, 500);
         }
         
-        vscode.window.showInformationMessage('Migration stopped');
+        logMessage('Migration stopped by user - operation cancelled');
     }
 }
 
@@ -705,14 +760,14 @@ async function runRefactorWithData(formData: RefactorFormData): Promise<void> {
         
         // Check if we have a workspace folder
         if (!vscode.workspace.workspaceFolders || vscode.workspace.workspaceFolders.length === 0) {
-            vscode.window.showErrorMessage('GFactor requires an open workspace folder to function.');
+            logMessage('⚠️ ERROR: GFactor requires an open workspace folder to function.');
             return;
         }
 
         // Check if API keys are configured
         const llmConfig = getLlmConfig();
         if (!llmConfig) {
-            vscode.window.showErrorMessage('GFactor requires an API key for Claude to function. Please configure it first.');
+            logMessage('⚠️ ERROR: GFactor requires an API key for Claude to function. Please configure it first.');
             return;
         }
 
@@ -737,6 +792,7 @@ async function runRefactorWithData(formData: RefactorFormData): Promise<void> {
                     await delayAfterMigration();
                     // Only notify completion for countFiles action
                     if (sidebarWebview) {
+                        logMessage('🔴 CANCEL BUTTON: Count files completed, hiding cancel button 🔴');
                         sidebarWebview.postMessage({
                             command: 'migrationComplete'
                         });
@@ -750,6 +806,7 @@ async function runRefactorWithData(formData: RefactorFormData): Promise<void> {
                     await delayAfterMigration();
                     // Notify completion after migration is done
                     if (sidebarWebview) {
+                        logMessage('🔴 CANCEL BUTTON: Migrate one file completed, hiding cancel button 🔴');
                         sidebarWebview.postMessage({
                             command: 'migrationComplete'
                         });
@@ -763,6 +820,7 @@ async function runRefactorWithData(formData: RefactorFormData): Promise<void> {
                     await delayAfterMigration();
                     // Notify completion after migration is done
                     if (sidebarWebview) {
+                        logMessage('🔴 CANCEL BUTTON: Migrate all files completed, hiding cancel button 🔴');
                         sidebarWebview.postMessage({
                             command: 'migrationComplete'
                         });
@@ -775,6 +833,7 @@ async function runRefactorWithData(formData: RefactorFormData): Promise<void> {
                     await delayAfterMigration();
                     // Notify completion after migration is done
                     if (sidebarWebview) {
+                        logMessage('🔴 CANCEL BUTTON: Migration completed, hiding cancel button 🔴');
                         sidebarWebview.postMessage({
                             command: 'migrationComplete'
                         });
@@ -792,6 +851,7 @@ async function runRefactorWithData(formData: RefactorFormData): Promise<void> {
         
         // Ensure UI is reset even if there's an error
         if (sidebarWebview) {
+            logMessage('🔴 CANCEL BUTTON: Error occurred, hiding cancel button 🔴');
             sidebarWebview.postMessage({
                 command: 'migrationComplete'
             });
@@ -818,7 +878,6 @@ async function showBurndownChart(): Promise<void> {
     if (occurrences.length === 0) {
         const message = 'No pattern occurrence data available. Run a refactoring first.';
         logMessage(message);
-        vscode.window.showInformationMessage(message);
         return;
     }
     

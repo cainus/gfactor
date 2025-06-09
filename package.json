@@ -64,7 +64,7 @@
         "gfactor.claudeApiKey": {
           "type": "string",
           "default": "",
-          "description": "API key for Anthropic Claude"
+          "description": "API key for Claude CLI (not used directly, but kept for backward compatibility)"
         }
       }
     }
@@ -108,7 +108,6 @@
     "typescript-eslint": "^8.33.1"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.53.0",
     "canvas": "^3.1.0",
     "glob": "^10.4.5",
     "markdown-it": "^14.1.0"

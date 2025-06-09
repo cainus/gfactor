@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import { logMessage } from './logging';
 
 // Get API key configuration
 export function getLlmConfig(): { type: 'claude'; apiKey: string } | null {
@@ -18,5 +19,5 @@ export async function saveApiKeys(_llmType: string, apiKey: string): Promise<voi
   
   // Save API key to configuration
   await config.update('claudeApiKey', apiKey, vscode.ConfigurationTarget.Global);
-  vscode.window.showInformationMessage('Claude API key configured successfully!');
+  logMessage('✅ SUCCESS: Claude API key configured successfully!');
 }
