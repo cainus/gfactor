@@ -61,24 +61,10 @@
     "configuration": {
       "title": "GFactor",
       "properties": {
-        "gfactor.geminiApiKey": {
-          "type": "string",
-          "default": "",
-          "description": "API key for Google Gemini"
-        },
         "gfactor.claudeApiKey": {
           "type": "string",
           "default": "",
           "description": "API key for Anthropic Claude"
-        },
-        "gfactor.preferredLlm": {
-          "type": "string",
-          "enum": [
-            "gemini",
-            "claude"
-          ],
-          "default": "gemini",
-          "description": "Preferred LLM to use for code migration"
         }
       }
     }
@@ -123,7 +109,6 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.53.0",
-    "@google/generative-ai": "^0.24.1",
     "canvas": "^3.1.0",
     "glob": "^10.4.5",
     "markdown-it": "^14.1.0"

@@ -1,40 +1,10 @@
 import * as vscode from 'vscode';
-import * as fs from 'fs';
-import * as path from 'path';
-import * as glob from 'glob';
-import * as childProcess from 'child_process';
-import * as MarkdownIt from 'markdown-it';
-import { GoogleGenerativeAI } from '@google/generative-ai';
-import { Anthropic } from '@anthropic-ai/sdk';
-
-// Interfaces
-interface RefactorFormData {
-    compilerLinterCommand: string;
-    testCommand: string;
-    filePatterns: string;
-    findPattern: string;
-    replacePattern: string;
-    stopOption: 'afterEachFix' | 'afterEachFile' | 'onlyWhenComplete' | 'custom';
-    action?: 'countFiles' | 'migrateOneFile' | 'migrateAllFiles';
-}
-
-interface LlmConfig {
-    type: 'gemini' | 'claude';
-    apiKey: string;
-}
-
-// Interface for pattern tracking
-interface PatternOccurrence {
-    timestamp: Date;
-    count: number;
-    file?: string;
-}
-
-// Global state to track pattern occurrences
-let patternOccurrences: PatternOccurrence[] = [];
-
-// Output channel for logging
-let outputChannel: vscode.OutputChannel;
+import { PatternOccurrence } from './utils/types';
+import { logMessage, initializeLogging, setSidebarWebview, clearLogs } from './utils/logging';
+import { collectMdcContext } from './utils/file-utils';
+import { saveApiKeys, getLlmConfig } from './utils/config-manager';
+import { MigrationService } from './migration/migration-service';
+import { RefactorFormData } from './migration/types';
 
 // Cancellation token source for stopping migrations
 let migrationCancellationTokenSource: vscode.CancellationTokenSource | undefined;
@@ -42,10 +12,15 @@ let migrationCancellationTokenSource: vscode.CancellationTokenSource | undefined
 // Storage keys
 const FORM_DATA_STORAGE_KEY = 'gfactor.formData';
 const FORM_DISPLAY_STATE_KEY = 'gfactor.formDisplayState';
+const LOG_STORAGE_KEY = 'gfactor.logs';
+
+// Store logs in memory for persistence
+let logMessages: string[] = [];
 
 // Global variables
 let extensionContext: vscode.ExtensionContext;
 let sidebarWebview: vscode.Webview | undefined;
+let migrationService: MigrationService;
 
 // Sidebar webview provider
 class GFactorSidebarProvider implements vscode.WebviewViewProvider {
@@ -63,6 +38,7 @@ class GFactorSidebarProvider implements vscode.WebviewViewProvider {
 
         // Store the webview reference for logging
         sidebarWebview = webviewView.webview;
+        setSidebarWebview(webviewView.webview);
         
         webviewView.webview.html = this._getHtmlForWebview(webviewView.webview);
 
@@ -100,23 +76,44 @@ class GFactorSidebarProvider implements vscode.WebviewViewProvider {
                     vscode.commands.executeCommand('gfactor.showBurndownChart');
                     break;
                 }
+                case 'logButtonState': {
+                    // Log button state changes to the output channel
+                    logMessage(message.message);
+                    break;
+                }
+                case 'persistLog': {
+                    // Persist log message to extension context
+                    logMessages.push(message.message);
+                    const extContext = getExtensionContext();
+                    extContext.globalState.update(LOG_STORAGE_KEY, logMessages);
+                    break;
+                }
+                case 'requestLogs': {
+                    // Send saved logs to the webview
+                    webviewView.webview.postMessage({
+                        command: 'restoreLogs',
+                        logs: logMessages
+                    });
+                    break;
+                }
             }
         });
     }
 
     private _getHtmlForWebview(webview: vscode.Webview): string {
-        // Get saved form data and display state if available
+        // Get saved form data, display state, and logs if available
         const context = getExtensionContext();
         const savedFormData = context.globalState.get<RefactorFormData | undefined>(FORM_DATA_STORAGE_KEY);
         const displayState = context.globalState.get<{apiKeysForm: boolean}>(FORM_DISPLAY_STATE_KEY) ||
             { apiKeysForm: false };
         
+        // Get saved logs
+        logMessages = context.globalState.get<string[]>(LOG_STORAGE_KEY) || [];
+        
         // Get API key information
         const config = vscode.workspace.getConfiguration('gfactor');
         // Get API key information for display purposes
-        const hasGeminiKey = !!config.get<string>('geminiApiKey');
         const hasClaudeKey = !!config.get<string>('claudeApiKey');
-        const preferredLlm = config.get<string>('preferredLlm') || 'gemini';
         
         return `<!DOCTYPE html>
 <html lang="en">
@@ -248,6 +245,9 @@ class GFactorSidebarProvider implements vscode.WebviewViewProvider {
             opacity: 0.5;
             cursor: not-allowed;
         }
+        .hidden {
+            display: none !important;
+        }
         .cancel-button {
             background-color: var(--vscode-button-secondaryBackground);
             color: var(--vscode-button-secondaryForeground);
@@ -274,17 +274,12 @@ class GFactorSidebarProvider implements vscode.WebviewViewProvider {
     </button>
     
     <div id="apiKeysForm" class="form-section">
-        <h3>Configure API Keys</h3>
+        <h3>Configure API Key</h3>
         <div class="form-group">
-            <label for="llmType">Select LLM:</label>
+            <label for="llmType">LLM:</label>
             <div class="radio-group">
                 <div class="radio-option">
-                    <input type="radio" id="gemini" name="llmType" value="gemini" ${preferredLlm === 'gemini' ? 'checked' : ''}>
-                    <span>${hasGeminiKey ? '✓' : '✗'}</span>
-                    <label for="gemini">Google Gemini</label>
-                </div>
-                <div class="radio-option">
-                    <input type="radio" id="claude" name="llmType" value="claude" ${preferredLlm === 'claude' ? 'checked' : ''}>
+                    <input type="radio" id="claude" name="llmType" value="claude" checked>
                     <span>${hasClaudeKey ? '✓' : '✗'}</span>
                     <label for="claude">Anthropic Claude</label>
                 </div>
@@ -333,7 +328,7 @@ class GFactorSidebarProvider implements vscode.WebviewViewProvider {
             <button type="button" id="countFiles" class="action-button">Count the files to migrate</button>
             <button type="button" id="migrateOneFile" class="action-button">Migrate 1 file</button>
             <button type="button" id="migrateAllFiles" class="action-button">Migrate all files</button>
-            <button type="button" id="stopMigration" class="stop-button" disabled>Stop Migration</button>
+            <button type="button" id="stopMigration" class="stop-button" disabled>Cancel Migration</button>
         </div>
     </div>
     
@@ -349,15 +344,42 @@ class GFactorSidebarProvider implements vscode.WebviewViewProvider {
         // Function to add log messages to the log window
         function addLogMessage(message) {
             const logContent = document.getElementById('logContent');
-            const timestamp = new Date().toLocaleTimeString();
             const logEntry = document.createElement('div');
-            logEntry.textContent = '[' + timestamp + '] ' + message;
+            logEntry.textContent = message;
             logContent.appendChild(logEntry);
             
             // Auto-scroll to bottom
             const logWindow = document.getElementById('logWindow');
             logWindow.scrollTop = logWindow.scrollHeight;
+            
+            // Send message to extension to persist the log
+            vscode.postMessage({
+                command: 'persistLog',
+                message: message
+            });
         }
+        
+        // Function to restore saved logs
+        function restoreLogs(logs) {
+            const logContent = document.getElementById('logContent');
+            logs.forEach(message => {
+                const logEntry = document.createElement('div');
+                logEntry.textContent = message;
+                logContent.appendChild(logEntry);
+            });
+            
+            // Auto-scroll to bottom
+            const logWindow = document.getElementById('logWindow');
+            logWindow.scrollTop = logWindow.scrollHeight;
+        }
+        
+        // Restore saved logs when the webview loads
+        document.addEventListener('DOMContentLoaded', () => {
+            // Request saved logs from the extension
+            vscode.postMessage({
+                command: 'requestLogs'
+            });
+        });
         
         // Function to collect and save refactor form data
         function saveRefactorFormData() {
@@ -436,12 +458,11 @@ class GFactorSidebarProvider implements vscode.WebviewViewProvider {
         
         // API Keys form actions
         document.getElementById('saveApiKeys').addEventListener('click', () => {
-            const llmType = document.querySelector('input[name="llmType"]:checked').value;
             const apiKey = document.getElementById('apiKey').value;
             
             vscode.postMessage({
                 command: 'saveApiKeys',
-                data: { llmType, apiKey }
+                data: { llmType: 'claude', apiKey }
             });
             
             document.getElementById('apiKeysForm').style.display = 'none';
@@ -458,14 +479,34 @@ class GFactorSidebarProvider implements vscode.WebviewViewProvider {
             const actionButtons = ['countFiles', 'migrateOneFile', 'migrateAllFiles'];
             const stopButton = document.getElementById('stopMigration');
             
-            // Enable/disable action buttons
+            // Show/hide action buttons
             actionButtons.forEach(id => {
-                document.getElementById(id).disabled = isRunning;
+                const button = document.getElementById(id);
+                if (isRunning) {
+                    button.classList.add('hidden');
+                } else {
+                    button.classList.remove('hidden');
+                }
             });
             
             // Show/hide and enable/disable stop button
             stopButton.style.display = isRunning ? 'block' : 'none';
             stopButton.disabled = !isRunning;
+            
+            // Log button state changes
+            if (isRunning) {
+                addLogMessage('Cancel button is now available');
+                vscode.postMessage({
+                    command: 'logButtonState',
+                    message: 'Cancel button is now available'
+                });
+            } else {
+                addLogMessage('Cancel button is no longer available');
+                vscode.postMessage({
+                    command: 'logButtonState',
+                    message: 'Cancel button is no longer available'
+                });
+            }
         }
         
         // Refactor action buttons
@@ -546,6 +587,12 @@ class GFactorSidebarProvider implements vscode.WebviewViewProvider {
                 case 'migrationComplete':
                     setMigrationRunningState(false);
                     break;
+                case 'restoreLogs':
+                    restoreLogs(message.logs);
+                    break;
+                case 'clearLogs':
+                    document.getElementById('logContent').innerHTML = '';
+                    break;
             }
         });
     </script>
@@ -561,16 +608,17 @@ export function activate(context: vscode.ExtensionContext): void {
     // Store context for use in other functions
     extensionContext = context;
     
-    // Initialize output channel
-    outputChannel = vscode.window.createOutputChannel('GFactor');
-    outputChannel.appendLine('GFactor extension activated');
+    // Initialize logging
+    initializeLogging(context);
+    
+    // Initialize migration service
+    migrationService = new MigrationService();
     
     // Make sure the output channel is visible and focused
     vscode.commands.executeCommand('workbench.action.output.show').then(() => {
         vscode.commands.executeCommand('workbench.action.focusPanel');
         // Select the GFactor output channel
         vscode.commands.executeCommand('workbench.output.action.switchBetweenOutputs', 'GFactor');
-        outputChannel.show(true);
     });
 
     // Register the commands - just focus the sidebar view
@@ -604,13 +652,12 @@ export function deactivate(): void {}
 // Check if API keys are configured
 async function checkApiKeyConfiguration(_context: vscode.ExtensionContext): Promise<void> {
     const config = vscode.workspace.getConfiguration('gfactor');
-    const geminiApiKey = config.get<string>('geminiApiKey');
     const claudeApiKey = config.get<string>('claudeApiKey');
 
-    if (!geminiApiKey && !claudeApiKey) {
+    if (!claudeApiKey) {
         const configureNow = 'Configure Now';
         const response = await vscode.window.showInformationMessage(
-            'GFactor requires API keys for Gemini or Claude to function. Would you like to configure them now?',
+            'GFactor requires an API key for Claude to function. Would you like to configure it now?',
             configureNow
         );
 
@@ -620,23 +667,6 @@ async function checkApiKeyConfiguration(_context: vscode.ExtensionContext): Prom
         }
     }
 }
-
-// Configure API keys
-async function saveApiKeys(llmType: string, apiKey: string): Promise<void> {
-    const config = vscode.workspace.getConfiguration('gfactor');
-    
-    // Save API key to configuration
-    if (llmType === 'gemini') {
-        await config.update('geminiApiKey', apiKey, vscode.ConfigurationTarget.Global);
-        await config.update('preferredLlm', 'gemini', vscode.ConfigurationTarget.Global);
-        vscode.window.showInformationMessage('Gemini API key configured successfully!');
-    } else {
-        await config.update('claudeApiKey', apiKey, vscode.ConfigurationTarget.Global);
-        await config.update('preferredLlm', 'claude', vscode.ConfigurationTarget.Global);
-        vscode.window.showInformationMessage('Claude API key configured successfully!');
-    }
-}
-
 
 // Function to stop an ongoing migration
 function stopMigration(): void {
@@ -648,9 +678,12 @@ function stopMigration(): void {
         
         // Notify the webview that migration is complete
         if (sidebarWebview) {
-            sidebarWebview.postMessage({
-                command: 'migrationComplete'
-            });
+            // Add a small delay to ensure the UI updates properly
+            setTimeout(() => {
+                sidebarWebview?.postMessage({
+                    command: 'migrationComplete'
+                });
+            }, 500);
         }
         
         vscode.window.showInformationMessage('Migration stopped');
@@ -660,6 +693,16 @@ function stopMigration(): void {
 // Run refactoring with provided form data
 async function runRefactorWithData(formData: RefactorFormData): Promise<void> {
     try {
+        // Clear logs at the beginning of a new migration run
+        clearLogs();
+        
+        // Reset the in-memory log array
+        logMessages = [];
+        
+        // Clear logs from extension context
+        const context = getExtensionContext();
+        context.globalState.update(LOG_STORAGE_KEY, []);
+        
         // Check if we have a workspace folder
         if (!vscode.workspace.workspaceFolders || vscode.workspace.workspaceFolders.length === 0) {
             vscode.window.showErrorMessage('GFactor requires an open workspace folder to function.');
@@ -667,26 +710,10 @@ async function runRefactorWithData(formData: RefactorFormData): Promise<void> {
         }
 
         // Check if API keys are configured
-        const config = vscode.workspace.getConfiguration('gfactor');
-        const geminiApiKey = config.get<string>('geminiApiKey');
-        const claudeApiKey = config.get<string>('claudeApiKey');
-        const preferredLlm = config.get<string>('preferredLlm');
-
-        if (!geminiApiKey && !claudeApiKey) {
-            vscode.window.showErrorMessage('GFactor requires API keys for Gemini or Claude to function. Please configure them first.');
+        const llmConfig = getLlmConfig();
+        if (!llmConfig) {
+            vscode.window.showErrorMessage('GFactor requires an API key for Claude to function. Please configure it first.');
             return;
-        }
-
-        // Determine which LLM to use
-        let llmConfig: LlmConfig;
-        if (preferredLlm === 'gemini' && geminiApiKey) {
-            llmConfig = { type: 'gemini', apiKey: geminiApiKey };
-        } else if (preferredLlm === 'claude' && claudeApiKey) {
-            llmConfig = { type: 'claude', apiKey: claudeApiKey };
-        } else if (geminiApiKey) {
-            llmConfig = { type: 'gemini', apiKey: geminiApiKey };
-        } else {
-            llmConfig = { type: 'claude', apiKey: claudeApiKey! };
         }
 
         // Create a new cancellation token source
@@ -700,34 +727,62 @@ async function runRefactorWithData(formData: RefactorFormData): Promise<void> {
 
         // Handle different actions based on button clicked
         try {
+            // Add a small delay after migration completes to ensure the completion message is shown
+            const delayAfterMigration = (): Promise<void> => new Promise(resolve => setTimeout(resolve, 1000));
+            
             switch (formData.action) {
                 case 'countFiles':
-                    await countFilesToMigrate(formData, llmConfig, mdcContext, migrationCancellationTokenSource.token);
+                    await migrationService.countFilesToMigrate(formData, llmConfig, mdcContext, migrationCancellationTokenSource.token);
+                    // Add delay to ensure messages are shown
+                    await delayAfterMigration();
+                    // Only notify completion for countFiles action
+                    if (sidebarWebview) {
+                        sidebarWebview.postMessage({
+                            command: 'migrationComplete'
+                        });
+                    }
                     break;
                 case 'migrateOneFile':
                     // Set to process just one file
                     formData.stopOption = 'afterEachFile';
-                    await performRefactoring(formData, llmConfig, mdcContext, migrationCancellationTokenSource.token);
+                    await migrationService.performRefactoring(formData, llmConfig, mdcContext, migrationCancellationTokenSource.token);
+                    // Add delay to ensure completion message is shown
+                    await delayAfterMigration();
+                    // Notify completion after migration is done
+                    if (sidebarWebview) {
+                        sidebarWebview.postMessage({
+                            command: 'migrationComplete'
+                        });
+                    }
                     break;
                 case 'migrateAllFiles':
                     // Set to process all files
                     formData.stopOption = 'onlyWhenComplete';
-                    await performRefactoring(formData, llmConfig, mdcContext, migrationCancellationTokenSource.token);
+                    await migrationService.performRefactoring(formData, llmConfig, mdcContext, migrationCancellationTokenSource.token);
+                    // Add delay to ensure completion message is shown
+                    await delayAfterMigration();
+                    // Notify completion after migration is done
+                    if (sidebarWebview) {
+                        sidebarWebview.postMessage({
+                            command: 'migrationComplete'
+                        });
+                    }
                     break;
                 default:
                     // Fallback to normal refactoring
-                    await performRefactoring(formData, llmConfig, mdcContext, migrationCancellationTokenSource.token);
+                    await migrationService.performRefactoring(formData, llmConfig, mdcContext, migrationCancellationTokenSource.token);
+                    // Add delay to ensure completion message is shown
+                    await delayAfterMigration();
+                    // Notify completion after migration is done
+                    if (sidebarWebview) {
+                        sidebarWebview.postMessage({
+                            command: 'migrationComplete'
+                        });
+                    }
             }
         } finally {
-            // Notify the webview that migration is complete
-            if (sidebarWebview) {
-                sidebarWebview.postMessage({
-                    command: 'migrationComplete'
-                });
-            }
-            
-            // Clean up the cancellation token source
-            if (migrationCancellationTokenSource) {
+            // Clean up the cancellation token source only if it wasn't already disposed
+            if (migrationCancellationTokenSource && !migrationCancellationTokenSource.token.isCancellationRequested) {
                 migrationCancellationTokenSource.dispose();
                 migrationCancellationTokenSource = undefined;
             }
@@ -744,94 +799,6 @@ async function runRefactorWithData(formData: RefactorFormData): Promise<void> {
     }
 }
 
-// Count files that need migration without making changes
-async function countFilesToMigrate(
-    formData: RefactorFormData,
-    llmConfig: LlmConfig,
-    mdcContext: string,
-    cancellationToken: vscode.CancellationToken
-): Promise<void> {
-    logMessage('Counting files that need migration...');
-    
-    // Show progress
-    vscode.window.withProgress(
-        {
-            location: vscode.ProgressLocation.Notification,
-            title: 'GFactor: Counting files to migrate',
-            cancellable: true
-        },
-        async (progress, _progressToken) => {
-            // Use our own cancellation token that can be triggered by the stop button
-            const token = cancellationToken;
-            try {
-                // Find files matching the pattern
-                logMessage(`Searching for files matching pattern: ${formData.filePatterns}`);
-                const workspaceRoot = vscode.workspace.workspaceFolders![0].uri.fsPath;
-                const files = await glob.glob(formData.filePatterns, { cwd: workspaceRoot });
-                
-                if (files.length === 0) {
-                    const message = 'No files found matching the specified pattern.';
-                    logMessage(message);
-                    vscode.window.showWarningMessage(message);
-                    return;
-                }
-                
-                logMessage(`Found ${files.length} files to scan`);
-                progress.report({ message: `Found ${files.length} files to scan` });
-                
-                // Count files with pattern occurrences
-                let filesWithPatterns = 0;
-                let totalPatternCount = 0;
-                
-                for (let i = 0; i < files.length; i++) {
-                    if (token.isCancellationRequested) {
-                        break;
-                    }
-                    
-                    const file = files[i];
-                    const filePath = path.join(workspaceRoot, file);
-                    
-                    progress.report({
-                        message: `Scanning file ${i + 1}/${files.length}: ${file}`,
-                        increment: (1 / files.length) * 100
-                    });
-                    
-                    // Read file content
-                    const content = fs.readFileSync(filePath, 'utf8');
-                    
-                    // Count pattern occurrences in this file
-                    const patternCount = await countPatternOccurrences(
-                        content,
-                        formData.findPattern,
-                        file,
-                        llmConfig,
-                        mdcContext
-                    );
-                    
-                    if (patternCount > 0) {
-                        filesWithPatterns++;
-                        totalPatternCount += patternCount;
-                        logMessage(`Found ${patternCount} pattern occurrences in ${file}`);
-                    }
-                }
-                
-                // Show results
-                const message = `Found ${filesWithPatterns} files with patterns (${totalPatternCount} total pattern occurrences)`;
-                logMessage(message);
-                vscode.window.showInformationMessage(message);
-                
-            } catch (error) {
-                const errorMessage = `Error counting files: ${error}`;
-                logMessage(errorMessage);
-                console.error('Error counting files:', error);
-                vscode.window.showErrorMessage(errorMessage);
-            }
-        }
-    );
-}
-
-// Note: The standalone refactoring form is no longer used as it's now integrated in the sidebar
-
 // Get the extension context
 function getExtensionContext(): vscode.ExtensionContext {
     if (!extensionContext) {
@@ -840,532 +807,22 @@ function getExtensionContext(): vscode.ExtensionContext {
     return extensionContext;
 }
 
-// Log message to console, output channel, and webview
-function logMessage(message: string): void {
-    console.log(message);
-    
-    // Log to output channel
-    if (outputChannel) {
-        const timestamp = new Date().toLocaleTimeString();
-        outputChannel.appendLine(`[${timestamp}] ${message}`);
-    }
-    
-    // Log to webview if available
-    if (sidebarWebview) {
-        sidebarWebview.postMessage({
-            command: 'log',
-            message: message
-        });
-    }
-}
-
-// Get the HTML for the refactoring form
-// Note: The standalone refactoring form HTML is no longer used as it's now integrated in the sidebar
-
-// Collect context from .mdc files
-async function collectMdcContext(): Promise<string> {
-    if (!vscode.workspace.workspaceFolders || vscode.workspace.workspaceFolders.length === 0) {
-        logMessage('No workspace folder found for MDC context collection');
-        return '';
-    }
-
-    logMessage('Collecting context from .mdc files...');
-    const workspaceRoot = vscode.workspace.workspaceFolders[0].uri.fsPath;
-    const mdcFiles = await glob.glob('**/*.mdc', { cwd: workspaceRoot });
-    
-    if (mdcFiles.length === 0) {
-        logMessage('No .mdc files found in the workspace');
-        return '';
-    }
-    
-    logMessage(`Found ${mdcFiles.length} .mdc files for context`);
-    
-    let context = '';
-    const md = MarkdownIt.default();
-    
-    for (const file of mdcFiles) {
-        try {
-            const filePath = path.join(workspaceRoot, file);
-            logMessage(`Reading MDC file: ${file}`);
-            const content = fs.readFileSync(filePath, 'utf8');
-            const plainText = md.render(content);
-            context += `# ${file}\n${plainText}\n\n`;
-        } catch (error) {
-            const errorMessage = `Error reading .mdc file ${file}: ${error}`;
-            logMessage(errorMessage);
-            console.error(errorMessage);
-        }
-    }
-    
-    logMessage('MDC context collection completed');
-    return context;
-}
-
-// Run a command and return the result
-async function runCommand(command: string, cwd: string): Promise<{ success: boolean; output: string }> {
-    logMessage(`Executing command: ${command} in directory: ${cwd}`);
-    return new Promise((resolve) => {
-        childProcess.exec(command, { cwd }, (error, stdout, stderr) => {
-            if (error) {
-                logMessage(`Command failed with error: ${error.message}`);
-                if (stderr) {
-                    logMessage(`Command stderr: ${stderr}`);
-                }
-                resolve({ success: false, output: stderr || stdout });
-            } else {
-                logMessage(`Command executed successfully`);
-                if (stdout.trim()) {
-                    logMessage(`Command stdout: ${stdout.length > 500 ? stdout.substring(0, 500) + '...(truncated)' : stdout}`);
-                }
-                resolve({ success: true, output: stdout });
-            }
-        });
-    });
-}
-
-// Process the file content with the LLM
-async function processWithLlm(
-    content: string,
-    filePath: string,
-    formData: RefactorFormData,
-    llmConfig: LlmConfig,
-    mdcContext: string
-): Promise<string | null> {
-    try {
-        // Prepare the prompt for the LLM
-        const prompt = `
-You are an expert code refactoring assistant. Your task is to migrate code from one pattern to another.
-
-# Context from .mdc files:
-${mdcContext || 'No .mdc files found in the project.'}
-
-# File to refactor:
-${filePath}
-
-# Current content:
-\`\`\`
-${content}
-\`\`\`
-
-# Pattern to find:
-${formData.findPattern}
-
-# How to replace:
-${formData.replacePattern}
-
-Please refactor the code according to the specified pattern. Return ONLY the refactored code without any explanations or markdown formatting.
-`;
-
-        // Process with the appropriate LLM
-        if (llmConfig.type === 'gemini') {
-            return await processWithGemini(prompt, llmConfig.apiKey);
-        } else {
-            return await processWithClaude(prompt, llmConfig.apiKey);
-        }
-    } catch (error) {
-        const errorMessage = `Error processing with LLM: ${error}`;
-        logMessage(errorMessage);
-        console.error('Error processing with LLM:', error);
-        vscode.window.showErrorMessage(errorMessage);
-        return null;
-    }
-}
-
-// Process with Google's Gemini
-async function processWithGemini(prompt: string, apiKey: string): Promise<string | null> {
-    try {
-        const genAI = new GoogleGenerativeAI(apiKey);
-        const model = genAI.getGenerativeModel({ model: 'gemini-pro' });
-        
-        const result = await model.generateContent(prompt);
-        const response = result.response;
-        return response.text();
-    } catch (error) {
-        logMessage(`Error with Gemini API: ${error}`);
-        console.error('Error with Gemini API:', error);
-        throw error;
-    }
-}
-
-// Process with Anthropic's Claude
-async function processWithClaude(prompt: string, apiKey: string): Promise<string | null> {
-    try {
-        const anthropic = new Anthropic({
-            apiKey: apiKey
-        });
-        
-        const message = await anthropic.messages.create({
-            model: 'claude-3-opus-20240229',
-            max_tokens: 4000,
-            messages: [
-                {
-                    role: 'user',
-                    content: prompt
-                }
-            ]
-        });
-        
-        if (message.content[0].type === 'text') {
-            return message.content[0].text;
-        }
-        return null;
-    } catch (error) {
-        logMessage(`Error with Claude API: ${error}`);
-        console.error('Error with Claude API:', error);
-        throw error;
-    }
-}
-
-// Perform the refactoring process
-async function performRefactoring(
-    formData: RefactorFormData,
-    llmConfig: LlmConfig,
-    mdcContext: string,
-    cancellationToken: vscode.CancellationToken
-): Promise<void> {
-    // Reset pattern occurrences for new refactoring session
-    patternOccurrences = [];
-    
-    // Log start of refactoring
-    logMessage('Starting code migration process');
-    
-    // Show progress
-    vscode.window.withProgress(
-        {
-            location: vscode.ProgressLocation.Notification,
-            title: 'GFactor: Performing code migration',
-            cancellable: true
-        },
-        async (progress, _progressToken) => {
-            // Use our own cancellation token that can be triggered by the stop button
-            const token = cancellationToken;
-            try {
-                // Find files matching the pattern
-                logMessage(`Searching for files matching pattern: ${formData.filePatterns}`);
-                const workspaceRoot = vscode.workspace.workspaceFolders![0].uri.fsPath;
-                const files = await glob.glob(formData.filePatterns, { cwd: workspaceRoot });
-                
-                if (files.length === 0) {
-                    const message = 'No files found matching the specified pattern.';
-                    logMessage(message);
-                    vscode.window.showWarningMessage(message);
-                    return;
-                }
-                
-                logMessage(`Found ${files.length} files to process`);
-                progress.report({ message: `Found ${files.length} files to process` });
-                
-                // Count initial pattern occurrences across all files
-                logMessage('Scanning files for initial pattern count...');
-                let totalInitialPatternCount = 0;
-                for (const file of files) {
-                    const filePath = path.join(workspaceRoot, file);
-                    const content = fs.readFileSync(filePath, 'utf8');
-                    const patternCount = await countPatternOccurrences(
-                        content,
-                        formData.findPattern,
-                        file,
-                        llmConfig,
-                        mdcContext
-                    );
-                    if (patternCount > 0) {
-                        logMessage(`Found ${patternCount} pattern occurrences in ${file}`);
-                    }
-                    totalInitialPatternCount += patternCount;
-                }
-                
-                // Record initial pattern count
-                if (totalInitialPatternCount > 0) {
-                    logMessage(`Total initial pattern count: ${totalInitialPatternCount}`);
-                    patternOccurrences.push({
-                        timestamp: new Date(),
-                        count: totalInitialPatternCount
-                    });
-                } else {
-                    logMessage('No patterns found in any files.');
-                }
-                
-                // For migrateOneFile action, find the first file with patterns
-                let filesToProcess = files;
-                if (formData.action === 'migrateOneFile') {
-                    logMessage('Looking for the first file with patterns to migrate...');
-                    
-                    // Find the first file with patterns
-                    for (const file of files) {
-                        if (token.isCancellationRequested) {
-                            break;
-                        }
-                        
-                        const filePath = path.join(workspaceRoot, file);
-                        const content = fs.readFileSync(filePath, 'utf8');
-                        
-                        // Count pattern occurrences in this file
-                        const patternCount = await countPatternOccurrences(
-                            content,
-                            formData.findPattern,
-                            file,
-                            llmConfig,
-                            mdcContext
-                        );
-                        
-                        if (patternCount > 0) {
-                            // Found a file with patterns, process only this one
-                            filesToProcess = [file];
-                            logMessage(`Found file with patterns: ${file} (${patternCount} occurrences)`);
-                            break;
-                        }
-                    }
-                    
-                    if (filesToProcess.length === files.length) {
-                        logMessage('No files with patterns found to migrate.');
-                        vscode.window.showInformationMessage('No files with patterns found to migrate.');
-                        return;
-                    }
-                }
-                
-                // Process each file
-                for (let i = 0; i < filesToProcess.length; i++) {
-                    if (token.isCancellationRequested) {
-                        break;
-                    }
-                    
-                    const file = filesToProcess[i];
-                    const filePath = path.join(workspaceRoot, file);
-                    
-                    logMessage(`Processing file ${i + 1}/${filesToProcess.length}: ${file}`);
-                    progress.report({
-                        message: `Processing file ${i + 1}/${filesToProcess.length}: ${file}`,
-                        increment: (1 / filesToProcess.length) * 100
-                    });
-                    
-                    // Read file content
-                    logMessage(`Reading file content: ${file}`);
-                    const content = fs.readFileSync(filePath, 'utf8');
-                    
-                    // Count pattern occurrences in this file
-                    const initialPatternCount = await countPatternOccurrences(
-                        content,
-                        formData.findPattern,
-                        file,
-                        llmConfig,
-                        mdcContext
-                    );
-                    logMessage(`Found ${initialPatternCount} pattern occurrences in ${file}`);
-                    
-                    // Skip if no patterns found
-                    if (initialPatternCount === 0) {
-                        logMessage(`Skipping file ${file} - no patterns found`);
-                        continue;
-                    }
-                    
-                    // Process the file with the LLM
-                    logMessage(`Processing ${file} with ${llmConfig.type} LLM...`);
-                    const updatedContent = await processWithLlm(
-                        content,
-                        file,
-                        formData,
-                        llmConfig,
-                        mdcContext
-                    );
-                    
-                    if (!updatedContent) {
-                        logMessage(`LLM processing failed for ${file}`);
-                        continue;
-                    }
-                    
-                    if (updatedContent === content) {
-                        logMessage(`No changes made by LLM for ${file}`);
-                        continue;
-                    }
-                    
-                    // Count remaining patterns after refactoring
-                    const remainingPatternCount = await countPatternOccurrences(
-                        updatedContent,
-                        formData.findPattern,
-                        file,
-                        llmConfig,
-                        mdcContext
-                    );
-                    const patternsFixed = initialPatternCount - remainingPatternCount;
-                    logMessage(`LLM fixed ${patternsFixed} pattern occurrences in ${file}`);
-                    
-                    // Write the updated content back to the file
-                    logMessage(`Writing updated content to ${file}`);
-                    fs.writeFileSync(filePath, updatedContent, 'utf8');
-                    
-                    // Run compiler/linter
-                    logMessage(`Running linter: ${formData.compilerLinterCommand}`);
-                    const linterResult = await runCommand(formData.compilerLinterCommand, workspaceRoot);
-                    if (!linterResult.success) {
-                        logMessage(`Linter failed for ${file}. Reverting changes.`);
-                        // If linter fails, revert the change
-                        fs.writeFileSync(filePath, content, 'utf8');
-                        
-                        if (formData.stopOption === 'afterEachFix' || formData.stopOption === 'afterEachFile') {
-                            const tryAgain = await vscode.window.showErrorMessage(
-                                `Linter failed for file ${file}. Changes have been reverted.`,
-                                'Try Again',
-                                'Skip File',
-                                'Stop Migration'
-                            );
-                            
-                            if (tryAgain === 'Try Again') {
-                                i--; // Process the same file again
-                                continue;
-                            } else if (tryAgain === 'Stop Migration') {
-                                break;
-                            }
-                            // If 'Skip File', continue to the next file
-                        }
-                        
-                        continue;
-                    }
-                    
-                    // Run tests
-                    logMessage(`Running tests: ${formData.testCommand}`);
-                    const testResult = await runCommand(formData.testCommand, workspaceRoot);
-                    if (!testResult.success) {
-                        logMessage(`Tests failed for ${file}. Reverting changes.`);
-                        // If tests fail, revert the change
-                        fs.writeFileSync(filePath, content, 'utf8');
-                        
-                        if (formData.stopOption === 'afterEachFix' || formData.stopOption === 'afterEachFile') {
-                            const tryAgain = await vscode.window.showErrorMessage(
-                                `Tests failed for file ${file}. Changes have been reverted.`,
-                                'Try Again',
-                                'Skip File',
-                                'Stop Migration'
-                            );
-                            
-                            if (tryAgain === 'Try Again') {
-                                i--; // Process the same file again
-                                continue;
-                            } else if (tryAgain === 'Stop Migration') {
-                                break;
-                            }
-                            // If 'Skip File', continue to the next file
-                        }
-                        
-                        continue;
-                    }
-                    
-                    logMessage(`Tests passed for ${file}`);
-                    
-                    // Record successful pattern fixes
-                    if (patternsFixed > 0) {
-                        logMessage(`Successfully fixed ${patternsFixed} pattern occurrences in ${file}`);
-                        // Get current total count
-                        const currentTotal = patternOccurrences.length > 0
-                            ? patternOccurrences[patternOccurrences.length - 1].count
-                            : totalInitialPatternCount;
-                        
-                        patternOccurrences.push({
-                            timestamp: new Date(),
-                            count: currentTotal - patternsFixed,
-                            file: file
-                        });
-                    }
-                    
-                    // If we're stopping after each file, show a message
-                    if (formData.stopOption === 'afterEachFile') {
-                        const continueRefactoring = await vscode.window.showInformationMessage(
-                            `Successfully migrated file ${file} (${i + 1}/${filesToProcess.length}).`,
-                            'Continue',
-                            'Stop Migration'
-                        );
-                        
-                        if (continueRefactoring === 'Stop Migration') {
-                            break;
-                        }
-                    }
-                }
-                
-                // Log completion
-                logMessage('Code migration process completed successfully!');
-                
-                // Show completion message
-                vscode.window.showInformationMessage('Code migration completed successfully!');
-            } catch (error) {
-                const errorMessage = `Error during code migration: ${error}`;
-                logMessage(errorMessage);
-                console.error('Error during refactoring:', error);
-                vscode.window.showErrorMessage(errorMessage);
-            }
-        }
-    );
-}
-
-// Count pattern occurrences in content using LLM
-async function countPatternOccurrences(
-    content: string,
-    findPattern: string,
-    filePath: string,
-    llmConfig: LlmConfig,
-    mdcContext: string
-): Promise<number> {
-    logMessage(`Using LLM to count pattern occurrences in ${filePath}`);
-    
-    // Prepare the prompt for the LLM
-    const prompt = `
-You are an expert code analyzer. Your task is to count how many instances of a specific pattern exist in the code.
-
-# Context from .mdc files:
-${mdcContext || 'No .mdc files found in the project.'}
-
-# File to analyze:
-${filePath}
-
-# Current content:
-\`\`\`
-${content}
-\`\`\`
-
-# Pattern to find:
-${findPattern}
-
-Please analyze the code and count how many instances of the specified pattern exist.
-Return ONLY a single number representing the count, with no additional text or explanation.
-`;
-
-    try {
-        // Process with the appropriate LLM
-        let countText: string | null;
-        if (llmConfig.type === 'gemini') {
-            countText = await processWithGemini(prompt, llmConfig.apiKey);
-        } else {
-            countText = await processWithClaude(prompt, llmConfig.apiKey);
-        }
-        
-        // Parse the result to get the count
-        if (countText) {
-            const count = parseInt(countText.trim(), 10);
-            if (!isNaN(count)) {
-                logMessage(`LLM found ${count} pattern occurrences in ${filePath}`);
-                return count;
-            }
-        }
-        
-        logMessage(`Failed to get valid count from LLM for ${filePath}, defaulting to 0`);
-        return 0;
-    } catch (error) {
-        logMessage(`Error counting patterns with LLM: ${error}`);
-        return 0;
-    }
-}
-
 // Show burndown chart
 async function showBurndownChart(): Promise<void> {
     logMessage('Generating burndown chart...');
     
+    // Get pattern occurrences from migration service
+    const occurrences = migrationService.getPatternOccurrences();
+    
     // If no data, show a message
-    if (patternOccurrences.length === 0) {
+    if (occurrences.length === 0) {
         const message = 'No pattern occurrence data available. Run a refactoring first.';
         logMessage(message);
         vscode.window.showInformationMessage(message);
         return;
     }
     
-    logMessage(`Creating burndown chart with ${patternOccurrences.length} data points`);
+    logMessage(`Creating burndown chart with ${occurrences.length} data points`);
     
     // Create a webview panel for the chart
     const panel = vscode.window.createWebviewPanel(
@@ -1378,7 +835,7 @@ async function showBurndownChart(): Promise<void> {
     );
     
     // Set the HTML content for the chart
-    panel.webview.html = getBurndownChartHtml(patternOccurrences);
+    panel.webview.html = getBurndownChartHtml(occurrences);
     logMessage('Burndown chart displayed');
 }
 
