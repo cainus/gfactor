@@ -18,7 +18,12 @@ const options = {
   minify: isProduction,
   define: {
     'process.env.NODE_ENV': isProduction ? '"production"' : '"development"'
-  }
+  },
+  loader: {
+    '.tsx': 'tsx',
+    '.jsx': 'jsx'
+  },
+  jsx: 'transform'
 };
 
 // Function to copy timestamp.txt to dist directory
