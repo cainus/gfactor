@@ -2,7 +2,7 @@
   "name": "gfactor",
   "displayName": "GFactor",
   "description": "AI-powered codebase migration tool for large-scale refactoring",
-  "version": "0.0.14",
+  "version": "0.0.15",
   "publisher": "cainus",
   "icon": "resources/gfactor-icon.png",
   "repository": {
