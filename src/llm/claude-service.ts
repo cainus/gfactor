@@ -1,14 +1,18 @@
-import * as childProcess from 'child_process';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import * as childProcess from 'child_process';
 import { LlmService } from './llm-types';
 import { logMessage } from '../utils/logging';
 
 export class ClaudeService implements LlmService {
+  // Debug flag to enable additional logging
+  private debug: boolean = true;
+  
   constructor(_apiKey: string) {
     // apiKey is not used directly since we're using the Claude CLI
     // but we keep the constructor signature for compatibility
+    console.log('ClaudeService initialized with debug mode:', this.debug);
   }
   
   async processPrompt(prompt: string): Promise<string | null> {
@@ -35,8 +39,12 @@ export class ClaudeService implements LlmService {
       // Retry loop
       while (retryCount <= MAX_RETRIES) {
         try {
-            logMessage(`🤖 CLAUDE: Attempting to process with real-time logging (attempt ${retryCount + 1}/${MAX_RETRIES + 1})`);
-            return await this.runClaudeWithRealTimeLogging(promptFilePath);
+            logMessage(`🤖 CLAUDE: Attempting to process prompt (attempt ${retryCount + 1}/${MAX_RETRIES + 1})`);
+            if (this.debug) {
+              console.log(`CLAUDE: Attempting to process prompt (attempt ${retryCount + 1}/${MAX_RETRIES + 1})`);
+            }
+            
+            return await this.runClaudeCommand(promptFilePath);
         } catch (error: unknown) {
           const errorMessage = error instanceof Error ? error.message : String(error);
           
@@ -68,167 +76,212 @@ export class ClaudeService implements LlmService {
     }
   }
   
-  // This method uses spawn to capture output in real-time (streaming) from the Claude CLI process
-  // It logs the output as it arrives, but still returns the complete result when finished
-  private async runClaudeWithRealTimeLogging(promptFilePath: string): Promise<string | null> {
-    // Use the Claude CLI with -p option to prevent interactive mode
-    // Use spawn instead of exec to stream the output
+  // This method uses execa and stream-json to capture and process output in real-time
+  // from the Claude CLI process. It logs the output as it arrives and returns the complete result.
+  // This method uses childProcess.spawn to run the Claude CLI command with streaming JSON output
+  private async runClaudeCommand(promptFilePath: string): Promise<string | null> {
     return new Promise<string | null>((resolve, reject) => {
+      // Parameters for Claude CLI - using the correct parameters for streaming JSON
+      const params = [
+        '-p',
+        promptFilePath,
+        '--output-format',
+        'stream-json',
+        '--verbose',
+        '--dangerously-skip-permissions'
+      ];
+      
+      // Log the command
+      const commandStr = `claude ${params.join(' ')}`;
+      logMessage(`🤖 CLAUDE: Executing command: ${commandStr}`);
+      if (this.debug) {
+        console.log(`CLAUDE: Executing command: ${commandStr}`);
+      }
+      
+      // Collect the full output
       let fullOutput = '';
-      let fullError = '';
-      
-      
-      // Use spawn to stream the output with explicit stdio configuration and JSON streaming
-      const params = ['-p', promptFilePath, '--output-format', 'stream-json', '--dangerously-skip-permissions'];
-      const command = `claude ${params.join(" ")}`;
-      logMessage(`🤖 CLAUDE: Executing command: ${command}`);
-      const claudeProcess = childProcess.spawn('claude', params, {
-        stdio: ['ignore', 'pipe', 'pipe'] // stdin, stdout, stderr
-      });
-      
-      // Log the spawn command for debugging
-      logMessage(`🤖 CLAUDE DEBUG: Spawned process with command: ${command}`);
-      
-      // Log when the process starts
-      logMessage(`🤖 CLAUDE: Process started with PID: ${claudeProcess.pid}`);
-      
-      // Log when we set up the data handlers
-      logMessage(`🤖 CLAUDE DEBUG: Setting up stdout and stderr handlers`);
-      
-      // Stream stdout and parse JSON
-      claudeProcess.stdout.on('data', (data) => {
-        logMessage(`🤖 CLAUDE DEBUG: Received stdout data of length ${data.length}`);
-        const chunk = data.toString();
-        
-        try {
-          // Each line is a separate JSON object in streaming mode
-          const lines = chunk.split('\n').filter((line: string) => line.trim());
-          
-          for (const line of lines) {
-            try {
-              const jsonData = JSON.parse(line);
-              
-              // Extract the content from the JSON structure
-              if (jsonData.completion) {
-                fullOutput += jsonData.completion;
-                
-                // Log each chunk of output with clear markers
-                logMessage(`🤖 CLAUDE JSON OUTPUT BEGIN 🤖`);
-                logMessage(`Type: ${jsonData.type}, Content: ${jsonData.completion}`);
-                logMessage(`🤖 CLAUDE JSON OUTPUT END 🤖`);
-              } else if (jsonData.error) {
-                // Handle error messages in the JSON
-                fullError += JSON.stringify(jsonData.error);
-                logMessage(`🤖 CLAUDE JSON ERROR: ${JSON.stringify(jsonData.error)}`);
-              }
-            } catch {
-              // If line isn't valid JSON, just log it as-is
-              fullOutput += line;
-              logMessage(`🤖 CLAUDE OUTPUT (non-JSON): ${line.trim()}`);
-            }
-          }
-        } catch {
-          // If parsing fails, treat as plain text
-          fullOutput += chunk;
-          logMessage(`🤖 CLAUDE OUTPUT BEGIN 🤖`);
-          logMessage(chunk.trim());
-          logMessage(`🤖 CLAUDE OUTPUT END 🤖`);
-        }
-      });
-      
-      // Stream stderr
-      claudeProcess.stderr.on('data', (data) => {
-        logMessage(`🤖 CLAUDE DEBUG: Received stderr data of length ${data.length}`);
-        const chunk = data.toString();
-        fullError += chunk;
-        // Log each chunk of error output with clear markers
-        logMessage(`🤖 CLAUDE ERROR OUTPUT BEGIN 🤖`);
-        logMessage(chunk.trim());
-        logMessage(`🤖 CLAUDE ERROR OUTPUT END 🤖`);
-      });
-      
-      // Add more event handlers for debugging
-      claudeProcess.stdout.on('readable', () => {
-        logMessage(`🤖 CLAUDE DEBUG: stdout became readable`);
-      });
-      
-      claudeProcess.stderr.on('readable', () => {
-        logMessage(`🤖 CLAUDE DEBUG: stderr became readable`);
-      });
-      
-      claudeProcess.stdout.on('end', () => {
-        logMessage(`🤖 CLAUDE DEBUG: stdout stream ended`);
-      });
-      
-      claudeProcess.stderr.on('end', () => {
-        logMessage(`🤖 CLAUDE DEBUG: stderr stream ended`);
-      });
       
       // Set up a heartbeat to show the process is still running
       const heartbeatInterval = setInterval(() => {
-        logMessage(`🤖 CLAUDE: Process ${claudeProcess.pid} still running (heartbeat)`);
+        logMessage(`🤖 CLAUDE: Process still running (heartbeat)`);
       }, 10000); // Log every 10 seconds
       
-      // Set a timeout to prevent hanging - increased to 5 minutes
+      // Set timeout duration - 5 minutes
       const timeoutDuration = 300000; // 5 minutes (300 seconds)
-      logMessage(`🤖 CLAUDE: Setting timeout for ${timeoutDuration/1000} seconds`);
+      let timeout: NodeJS.Timeout | null = null;
       
-      const timeout = setTimeout(() => {
-        logMessage(`🤖 CLAUDE ERROR: Process timed out after ${timeoutDuration/1000} seconds`);
-        // Clear the heartbeat before killing the process
-        clearInterval(heartbeatInterval);
-        claudeProcess.kill();
-        reject(new Error(`Claude CLI process timed out after ${timeoutDuration/1000} seconds`));
+      try {
+        // Use childProcess.spawn to create a process with streaming output
+        const claudeProcess = childProcess.spawn('claude', params, {
+          shell: true,
+          stdio: ['ignore', 'pipe', 'pipe']
+        });
         
-        // Clean up the temporary file
-        try {
-          fs.unlinkSync(promptFilePath);
-        } catch (unlinkError) {
-          console.error('Error deleting temporary prompt file:', unlinkError);
-        }
-      }, timeoutDuration);
-      
-      // Handle process completion
-      claudeProcess.on('close', (code) => {
-        // Clear the timeout and heartbeat
-        clearTimeout(timeout);
-        clearInterval(heartbeatInterval);
-        
-        // Clean up the temporary file
-        try {
-          fs.unlinkSync(promptFilePath);
-        } catch (unlinkError) {
-          console.error('Error deleting temporary prompt file:', unlinkError);
-        }
-        
-        if (code !== 0) {
-          logMessage(`🤖 CLAUDE: Process exited with code ${code}`);
-          if (fullError) {
-            logMessage(`🤖 CLAUDE ERROR: ${fullError}`);
-            console.error('Claude CLI stderr:', fullError);
+        // Set a timeout to prevent hanging - after process is created
+        timeout = setTimeout(() => {
+          logMessage(`🤖 CLAUDE ERROR: Process timed out after ${timeoutDuration/1000} seconds`);
+          clearInterval(heartbeatInterval);
+          claudeProcess.kill();
+          
+          // Clean up the temporary file
+          try {
+            fs.unlinkSync(promptFilePath);
+          } catch (unlinkError) {
+            console.error('Error deleting temporary prompt file:', unlinkError);
           }
-          reject(new Error(`Claude CLI process exited with code ${code}`));
-          return;
+          
+          reject(new Error(`Claude CLI process timed out after ${timeoutDuration/1000} seconds`));
+        }, timeoutDuration);
+        
+        // Log when the process starts
+        logMessage(`🤖 CLAUDE: Process started with PID: ${claudeProcess.pid}`);
+        if (this.debug) {
+          console.log(`CLAUDE: Process started with PID: ${claudeProcess.pid}`);
         }
         
-        logMessage(`🤖 CLAUDE: Process completed successfully`);
-        resolve(fullOutput.trim());
-      });
-      
-      // Handle process errors
-      claudeProcess.on('error', (error) => {
-        // Clear the timeout and heartbeat
-        clearTimeout(timeout);
+        // Buffer to collect partial JSON objects
+        let buffer = '';
+        
+        // Process stdout data
+        claudeProcess.stdout.on('data', (data) => {
+          // Append new data to buffer
+          buffer += data.toString();
+          
+          // Process complete lines from the buffer
+          let newlineIndex;
+          while ((newlineIndex = buffer.indexOf('\n')) !== -1) {
+            // Extract a complete line
+            const line = buffer.substring(0, newlineIndex).trim();
+            // Remove the processed line from the buffer
+            buffer = buffer.substring(newlineIndex + 1);
+            
+            // Skip empty lines
+            if (!line) continue;
+            
+            try {
+              // Parse the JSON object
+              const jsonData = JSON.parse(line);
+              
+              // Log in debug mode
+              if (this.debug) {
+                console.log(`CLAUDE JSON: Type=${jsonData.type}`);
+              }
+              
+              // Log the raw JSON for all message types
+              logMessage(`🤖 CLAUDE JSON: ${JSON.stringify(jsonData)}`);
+              
+              // Process based on the type field
+              switch (jsonData.type) {
+                case 'content_block_start':
+                  // A new content block is starting
+                  logMessage(`🤖 CLAUDE: Content block starting`);
+                  break;
+                  
+                case 'content_block_delta':
+                  // Content is being streamed
+                  if (jsonData.completion) {
+                    fullOutput += jsonData.completion;
+                    
+                    // Stream the content directly to the output window
+                    process.stdout.write(jsonData.completion);
+                    
+                    // Also log with markers for debugging
+                    logMessage(`🤖 CLAUDE CONTENT: ${jsonData.completion}`);
+                  }
+                  break;
+                  
+                case 'content_block_stop':
+                  // Content block is complete
+                  logMessage(`🤖 CLAUDE: Content block complete`);
+                  break;
+                  
+                case 'error':
+                  // Handle error messages
+                  logMessage(`🤖 CLAUDE ERROR: ${JSON.stringify(jsonData)}`);
+                  break;
+                  
+                case 'system':
+                case 'assistant':
+                case 'user':
+                  // Handle message types
+                  logMessage(`🤖 CLAUDE ${jsonData.type.toUpperCase()}: ${JSON.stringify(jsonData)}`);
+                  break;
+                  
+                default:
+                  // Handle any other message types
+                  logMessage(`🤖 CLAUDE UNKNOWN TYPE: ${jsonData.type}`);
+                  // Still capture any completion content
+                  if (jsonData.completion) {
+                    fullOutput += jsonData.completion;
+                  }
+                  break;
+              }
+            } catch (parseError) {
+              // If it's not valid JSON, log the raw line and error
+              logMessage(`🤖 CLAUDE RAW OUTPUT: ${line} (Parse error: ${parseError})`);
+              if (this.debug) {
+                console.log(`CLAUDE RAW OUTPUT: ${line}`);
+                console.log(`CLAUDE PARSE ERROR: ${parseError}`);
+              }
+            }
+          }
+        });
+        
+        // Handle stderr
+        claudeProcess.stderr.on('data', (data) => {
+          const chunk = data.toString();
+          logMessage(`🤖 CLAUDE ERROR: ${chunk.trim()}`);
+          if (this.debug) {
+            console.error(`CLAUDE ERROR: ${chunk.trim()}`);
+          }
+        });
+        
+        // Handle process completion
+        claudeProcess.on('close', (code) => {
+          if (timeout) clearTimeout(timeout);
+          clearInterval(heartbeatInterval);
+          
+          // Clean up the temporary file
+          try {
+            fs.unlinkSync(promptFilePath);
+          } catch (unlinkError) {
+            console.error('Error deleting temporary prompt file:', unlinkError);
+          }
+          
+          if (code !== 0) {
+            logMessage(`🤖 CLAUDE: Process exited with code ${code}`);
+            reject(new Error(`Claude CLI process exited with code ${code}`));
+            return;
+          }
+          
+          logMessage(`🤖 CLAUDE: Process completed successfully`);
+          resolve(fullOutput.trim());
+        });
+        
+        // Handle process errors
+        claudeProcess.on('error', (error) => {
+          if (timeout) clearTimeout(timeout);
+          clearInterval(heartbeatInterval);
+          
+          logMessage(`🤖 CLAUDE ERROR: Process error: ${error.message}`);
+          
+          // Clean up the temporary file
+          try {
+            fs.unlinkSync(promptFilePath);
+          } catch (unlinkError) {
+            console.error('Error deleting temporary prompt file:', unlinkError);
+          }
+          
+          reject(error);
+        });
+        
+      } catch (error) {
+        // Handle any errors during process creation
+        if (timeout) clearTimeout(timeout);
         clearInterval(heartbeatInterval);
         
-        logMessage(`🤖 CLAUDE ERROR: Process error: ${error.message}`);
-        console.error('Error running Claude CLI:', error);
-        
-        // Check if the error is ENOENT (command not found)
-        const nodeError = error as NodeJS.ErrnoException;
-        if (nodeError.code === 'ENOENT') {
-          logMessage(`🤖 CLAUDE ERROR: Claude CLI not found. Make sure it's installed with 'npm install -g @anthropic-ai/claude-code'`);
-        }
+        logMessage(`🤖 CLAUDE ERROR: Failed to start process: ${error instanceof Error ? error.message : String(error)}`);
+        console.error('Failed to start Claude CLI process:', error);
         
         // Clean up the temporary file
         try {
@@ -238,7 +291,7 @@ export class ClaudeService implements LlmService {
         }
         
         reject(error);
-      });
+      }
     });
   }
   
