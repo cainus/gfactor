@@ -1,5 +1,7 @@
 import * as vscode from 'vscode';
 import * as childProcess from 'child_process';
+import * as fs from 'fs';
+import * as path from 'path';
 import { PatternOccurrence } from './utils/types';
 import { logMessage, initializeLogging, setSidebarWebview, clearLogs } from './utils/logging';
 import { collectMdcContext } from './utils/file-utils';
@@ -44,6 +46,66 @@ class GFactorSidebarProvider implements vscode.WebviewViewProvider {
         // Restore logs from extension context when webview is created
         const context = getExtensionContext();
         logMessages = context.globalState.get<string[]>(LOG_STORAGE_KEY) || [];
+        
+        // Get package version
+        let packageVersion = "1.0.0"; // Default fallback
+        try {
+            const packageJsonPath = path.join(this._extensionUri.fsPath, 'package.json');
+            const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, 'utf8'));
+            packageVersion = packageJson.version;
+        } catch (error) {
+            console.error('Error reading package.json:', error);
+        }
+        
+        // Read timestamp from file for logging
+        let formattedTimestamp = "June 10, 2025, 3:00 PM"; // Default fallback
+        try {
+            // Try multiple locations for timestamp.txt
+            let timestampContent;
+            
+            // First try: workspace folder
+            if (vscode.workspace.workspaceFolders && vscode.workspace.workspaceFolders.length > 0) {
+                try {
+                    const workspaceTimestampPath = path.join(vscode.workspace.workspaceFolders[0].uri.fsPath, 'timestamp.txt');
+                    timestampContent = fs.readFileSync(workspaceTimestampPath, 'utf8').trim();
+                    console.log('Found timestamp.txt in workspace folder');
+                } catch {
+                    // Workspace folder failed, continue to next location
+                }
+            }
+            
+            // Second try: extension directory
+            if (!timestampContent) {
+                try {
+                    const extensionTimestampPath = path.join(this._extensionUri.fsPath, 'timestamp.txt');
+                    timestampContent = fs.readFileSync(extensionTimestampPath, 'utf8').trim();
+                    console.log('Found timestamp.txt in extension directory');
+                } catch {
+                    // Extension directory failed, continue to next location
+                }
+            }
+            
+            // Third try: dist directory
+            if (!timestampContent) {
+                try {
+                    const distTimestampPath = path.join(this._extensionUri.fsPath, 'dist', 'timestamp.txt');
+                    timestampContent = fs.readFileSync(distTimestampPath, 'utf8').trim();
+                    console.log('Found timestamp.txt in dist directory');
+                } catch {
+                    // Dist directory failed, use default
+                }
+            }
+            
+            // Use the timestamp content if found
+            if (timestampContent) {
+                formattedTimestamp = timestampContent;
+            }
+        } catch (error) {
+            console.error('Error reading timestamp file:', error);
+        }
+        
+        // Log the current date/time as a static string when the extension panel first shows up
+        logMessage(`Extension panel opened - v${packageVersion} | ${formattedTimestamp}`);
         
         webviewView.webview.html = this._getHtmlForWebview(webviewView.webview);
 
@@ -124,12 +186,63 @@ class GFactorSidebarProvider implements vscode.WebviewViewProvider {
         // Get API key information for display purposes
         const hasClaudeKey = !!config.get<string>('claudeApiKey');
         
+        // Get package version
+        let packageVersion = "1.0.0"; // Default fallback
+        try {
+            const packageJsonPath = path.join(this._extensionUri.fsPath, 'package.json');
+            const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, 'utf8'));
+            packageVersion = packageJson.version;
+        } catch (error) {
+            console.error('Error reading package.json:', error);
+        }
+        
+        // Read timestamp from file
+        let timestampContent = "[missing timestamp]";
+        try {
+            // Try multiple locations for timestamp.txt
+            
+            // First try: workspace folder
+            if (vscode.workspace.workspaceFolders && vscode.workspace.workspaceFolders.length > 0) {
+                try {
+                    const workspaceTimestampPath = path.join(vscode.workspace.workspaceFolders[0].uri.fsPath, 'timestamp.txt');
+                    timestampContent = fs.readFileSync(workspaceTimestampPath, 'utf8').trim();
+                    console.log('Found timestamp.txt in workspace folder (HTML generation)');
+                } catch {
+                    // Workspace folder failed, continue to next location
+                }
+            }
+            
+            // Second try: extension directory
+            if (timestampContent === "[missing timestamp]") {
+                try {
+                    const extensionTimestampPath = path.join(this._extensionUri.fsPath, 'timestamp.txt');
+                    timestampContent = fs.readFileSync(extensionTimestampPath, 'utf8').trim();
+                    console.log('Found timestamp.txt in extension directory (HTML generation)');
+                } catch {
+                    // Extension directory failed, continue to next location
+                }
+            }
+            
+            // Third try: dist directory
+            if (timestampContent === "[missing timestamp]") {
+                try {
+                    const distTimestampPath = path.join(this._extensionUri.fsPath, 'dist', 'timestamp.txt');
+                    timestampContent = fs.readFileSync(distTimestampPath, 'utf8').trim();
+                    console.log('Found timestamp.txt in dist directory (HTML generation)');
+                } catch {
+                    // Dist directory failed, use default
+                }
+            }
+        } catch (error) {
+            console.error('Error reading timestamp file:', error);
+        }
+        
         return `<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>GFactor AI Migration Assistant</title>
+    <title>GFactor AI Migration Assistant - ${timestampContent}</title>
     <style>
         body {
             font-family: var(--vscode-font-family);
@@ -272,7 +385,10 @@ class GFactorSidebarProvider implements vscode.WebviewViewProvider {
 <body>
     <div style="display: flex; align-items: center; margin-bottom: 16px;">
         <img src="${webview.asWebviewUri(vscode.Uri.joinPath(this._extensionUri, 'resources', 'gfactor-icon.png'))}" alt="GFactor Icon" width="32" height="32" style="margin-right: 12px;">
-        <h2 style="margin: 0;">GFactor AI Migration</h2>
+        <div>
+            <h2 style="margin: 0;">GFactor AI Migration</h2>
+            <div style="font-size: 12px; color: var(--vscode-descriptionForeground);">v${packageVersion} | ${timestampContent}</div>
+        </div>
     </div>
     <div class="description">
         AI-powered code migration tool for large-scale refactoring. Migrate your codebase from one pattern to another with AI assistance.
@@ -343,7 +459,10 @@ class GFactorSidebarProvider implements vscode.WebviewViewProvider {
     
     
     <div id="logWindow" style="margin-top: 20px; border: 1px solid var(--vscode-panel-border); background-color: var(--vscode-editor-background); height: 200px; overflow-y: auto; padding: 10px; font-family: monospace; font-size: 12px;">
-        <h3 style="margin-top: 0; margin-bottom: 10px;">Log Output</h3>
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+            <h3 style="margin: 0;">Log Output</h3>
+            <div style="font-size: 12px; color: var(--vscode-descriptionForeground);">v${packageVersion} | ${timestampContent}</div>
+        </div>
         <div id="logContent"></div>
     </div>
 

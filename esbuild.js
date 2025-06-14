@@ -1,5 +1,7 @@
 const esbuild = require('esbuild');
 const { argv } = require('process');
+const fs = require('fs');
+const path = require('path');
 
 const isProduction = argv.includes('--production');
 const isWatch = argv.includes('--watch');
@@ -19,14 +21,28 @@ const options = {
   }
 };
 
+// Function to copy timestamp.txt to dist directory
+function copyTimestampFile() {
+  try {
+    const sourceFile = './timestamp.txt';
+    const destFile = './dist/timestamp.txt';
+    fs.copyFileSync(sourceFile, destFile);
+    console.log('Timestamp file copied to dist directory');
+  } catch (error) {
+    console.error('Error copying timestamp file:', error);
+  }
+}
+
 if (isWatch) {
   const context = esbuild.context(options);
   context.then(ctx => {
     ctx.watch();
+    copyTimestampFile();
     console.log('Watching for changes...');
   });
 } else {
   esbuild.build(options).then(() => {
+    copyTimestampFile();
     console.log('Build complete!');
   }).catch(() => process.exit(1));
 }

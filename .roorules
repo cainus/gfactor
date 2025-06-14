@@ -1,8 +1,15 @@
-After every change, verify the change with:
+After every change, 
+
+Put the current date time in the title of the extension panel to mark when it was compiled.
+
+Make sure we're logging the current date/time as a static string (not dynamic) when the extension panel first shows up.
+
+then verify the change with:
 
 npm run lint && npm run check-types && npm run compile
 
 Then create a package with:
 
-npm run package && npx vsce package
+npm deploy
+
 
