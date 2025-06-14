@@ -99,11 +99,296 @@ export function getSidebarHtml(
     <script>
         const vscode = acquireVsCodeApi();
         
+        // Function to check if a string is valid JSON
+        function isJsonString(str) {
+            try {
+                // Check if the string has a prefix like "🤖 CLAUDE JSON:"
+                let jsonStr = str;
+                if (str.includes('🤖 CLAUDE JSON:')) {
+                    jsonStr = str.split('🤖 CLAUDE JSON:')[1].trim();
+                }
+                
+                JSON.parse(jsonStr);
+                return true;
+            } catch {
+                return false;
+            }
+        }
+        
+        // Function to check if a string is an assistant message
+        function isAssistantMessage(str) {
+            try {
+                // Check if the string has a prefix like "🤖 CLAUDE JSON:"
+                let jsonStr = str;
+                if (str.includes('🤖 CLAUDE JSON:')) {
+                    jsonStr = str.split('🤖 CLAUDE JSON:')[1].trim();
+                    console.log('Found Claude JSON prefix, extracting JSON part');
+                }
+                
+                const data = JSON.parse(jsonStr);
+                // Add a debug log to see what messages are being processed
+                console.log('Checking if message is assistant message:', data.type, !!data.message);
+                return data.type === 'assistant' && data.message;
+            } catch (e) {
+                console.log('Error parsing assistant message:', e);
+                return false;
+            }
+        }
+        
         // Function to add log messages to the log window
         function addLogMessage(message) {
             const logContent = document.getElementById('logContent');
             const logEntry = document.createElement('div');
-            logEntry.textContent = message;
+            
+            // Check if the message is an assistant message
+            if (isAssistantMessage(message)) {
+                console.log('Formatting assistant message');
+                try {
+                    // Create a custom formatted assistant message
+                    const assistantDiv = document.createElement('div');
+                    assistantDiv.style.backgroundColor = 'var(--vscode-editor-background)';
+                    assistantDiv.style.border = '1px solid var(--vscode-panel-border)';
+                    assistantDiv.style.borderRadius = '3px';
+                    assistantDiv.style.padding = '10px';
+                    assistantDiv.style.margin = '4px 0';
+                    assistantDiv.style.fontFamily = 'var(--vscode-font-family)';
+                    assistantDiv.style.fontSize = '12px';
+                    
+                    // Extract JSON part if there's a prefix
+                    let jsonStr = message;
+                    if (message.includes('🤖 CLAUDE JSON:')) {
+                        jsonStr = message.split('🤖 CLAUDE JSON:')[1].trim();
+                    }
+                    
+                    const data = JSON.parse(jsonStr);
+                    const assistantMessage = data.message;
+                    
+                    // Header
+                    const header = document.createElement('div');
+                    header.style.display = 'flex';
+                    header.style.justifyContent = 'space-between';
+                    header.style.borderBottom = '1px solid var(--vscode-panel-border)';
+                    header.style.paddingBottom = '6px';
+                    header.style.marginBottom = '6px';
+                    
+                    const title = document.createElement('span');
+                    title.style.fontWeight = 'bold';
+                    title.style.color = 'var(--vscode-charts-blue)';
+                    title.textContent = 'Assistant Message';
+                    
+                    const id = document.createElement('span');
+                    id.style.color = 'var(--vscode-descriptionForeground)';
+                    id.style.fontSize = '11px';
+                    id.textContent = assistantMessage.id;
+                    
+                    header.appendChild(title);
+                    header.appendChild(id);
+                    assistantDiv.appendChild(header);
+                    
+                    // Model
+                    if (assistantMessage.model) {
+                        const modelDiv = document.createElement('div');
+                        modelDiv.style.marginBottom = '6px';
+                        
+                        const modelLabel = document.createElement('span');
+                        modelLabel.style.fontWeight = 'bold';
+                        modelLabel.textContent = 'Model: ';
+                        
+                        const modelValue = document.createElement('span');
+                        modelValue.textContent = assistantMessage.model;
+                        
+                        modelDiv.appendChild(modelLabel);
+                        modelDiv.appendChild(modelValue);
+                        assistantDiv.appendChild(modelDiv);
+                    }
+                    
+                    // Content
+                    if (assistantMessage.content && assistantMessage.content.length > 0) {
+                        const contentDiv = document.createElement('div');
+                        contentDiv.style.marginBottom = '6px';
+                        
+                        const contentLabel = document.createElement('div');
+                        contentLabel.style.fontWeight = 'bold';
+                        contentLabel.style.marginBottom = '3px';
+                        contentLabel.textContent = 'Content:';
+                        contentDiv.appendChild(contentLabel);
+                        
+                        assistantMessage.content.forEach(item => {
+                            const itemDiv = document.createElement('div');
+                            itemDiv.style.marginLeft = '10px';
+                            itemDiv.style.marginBottom = '3px';
+                            
+                            if (item.type === 'tool_use') {
+                                const toolDiv = document.createElement('div');
+                                toolDiv.textContent = 'Tool: ' + (item.name || '');
+                                itemDiv.appendChild(toolDiv);
+                                
+                                if (item.input) {
+                                    const inputDiv = document.createElement('div');
+                                    inputDiv.style.marginLeft = '10px';
+                                    inputDiv.style.borderLeft = '2px solid var(--vscode-panel-border)';
+                                    inputDiv.style.paddingLeft = '8px';
+                                    
+                                    if (item.input.command) {
+                                        const commandDiv = document.createElement('div');
+                                        
+                                        const commandLabel = document.createElement('span');
+                                        commandLabel.style.fontStyle = 'italic';
+                                        commandLabel.textContent = 'Command: ';
+                                        
+                                        const commandCode = document.createElement('code');
+                                        commandCode.textContent = item.input.command;
+                                        
+                                        commandDiv.appendChild(commandLabel);
+                                        commandDiv.appendChild(commandCode);
+                                        inputDiv.appendChild(commandDiv);
+                                    }
+                                    
+                                    if (item.input.description) {
+                                        const descDiv = document.createElement('div');
+                                        
+                                        const descLabel = document.createElement('span');
+                                        descLabel.style.fontStyle = 'italic';
+                                        descLabel.textContent = 'Description: ';
+                                        
+                                        const descValue = document.createElement('span');
+                                        descValue.textContent = item.input.description;
+                                        
+                                        descDiv.appendChild(descLabel);
+                                        descDiv.appendChild(descValue);
+                                        inputDiv.appendChild(descDiv);
+                                    }
+                                    
+                                    itemDiv.appendChild(inputDiv);
+                                }
+                            } else {
+                                itemDiv.textContent = JSON.stringify(item);
+                            }
+                            
+                            contentDiv.appendChild(itemDiv);
+                        });
+                        
+                        assistantDiv.appendChild(contentDiv);
+                    }
+                    
+                    // Stop reason
+                    if (assistantMessage.stop_reason) {
+                        const stopDiv = document.createElement('div');
+                        stopDiv.style.marginBottom = '6px';
+                        
+                        const stopLabel = document.createElement('span');
+                        stopLabel.style.fontWeight = 'bold';
+                        stopLabel.textContent = 'Stop Reason: ';
+                        
+                        const stopValue = document.createElement('span');
+                        stopValue.textContent = assistantMessage.stop_reason;
+                        
+                        stopDiv.appendChild(stopLabel);
+                        stopDiv.appendChild(stopValue);
+                        assistantDiv.appendChild(stopDiv);
+                    }
+                    
+                    // Usage
+                    if (assistantMessage.usage) {
+                        const usageDiv = document.createElement('div');
+                        usageDiv.style.fontSize = '11px';
+                        usageDiv.style.color = 'var(--vscode-descriptionForeground)';
+                        usageDiv.style.borderTop = '1px solid var(--vscode-panel-border)';
+                        usageDiv.style.paddingTop = '6px';
+                        
+                        const usageLabel = document.createElement('div');
+                        usageLabel.style.fontWeight = 'bold';
+                        usageLabel.style.marginBottom = '3px';
+                        usageLabel.textContent = 'Usage:';
+                        usageDiv.appendChild(usageLabel);
+                        
+                        const usageDetails = document.createElement('div');
+                        usageDetails.style.display = 'flex';
+                        usageDetails.style.flexWrap = 'wrap';
+                        
+                        Object.entries(assistantMessage.usage).forEach(([key, value]) => {
+                            const usageItem = document.createElement('div');
+                            usageItem.style.marginRight = '12px';
+                            usageItem.textContent = key + ': ' + value;
+                            usageDetails.appendChild(usageItem);
+                        });
+                        
+                        usageDiv.appendChild(usageDetails);
+                        assistantDiv.appendChild(usageDiv);
+                    }
+                    
+                    // Session ID
+                    if (data.session_id) {
+                        const sessionDiv = document.createElement('div');
+                        sessionDiv.style.fontSize = '10px';
+                        sessionDiv.style.color = 'var(--vscode-descriptionForeground)';
+                        sessionDiv.style.marginTop = '6px';
+                        sessionDiv.textContent = 'Session: ' + data.session_id;
+                        assistantDiv.appendChild(sessionDiv);
+                    }
+                    
+                    logEntry.appendChild(assistantDiv);
+                } catch {
+                    // If formatting fails, fall back to JSON formatting
+                    try {
+                        const jsonData = JSON.parse(message);
+                        const pre = document.createElement('pre');
+                        pre.style.backgroundColor = 'var(--vscode-editor-background)';
+                        pre.style.border = '1px solid var(--vscode-panel-border)';
+                        pre.style.borderRadius = '3px';
+                        pre.style.padding = '8px';
+                        pre.style.overflow = 'auto';
+                        pre.style.fontSize = '12px';
+                        pre.style.fontFamily = 'monospace';
+                        pre.style.margin = '4px 0';
+                        pre.textContent = JSON.stringify(jsonData, null, 2);
+                        logEntry.appendChild(pre);
+                    } catch {
+                        // If JSON formatting fails, fall back to paragraph
+                        const p = document.createElement('p');
+                        p.style.margin = '4px 0';
+                        p.textContent = message;
+                        logEntry.appendChild(p);
+                    }
+                }
+            }
+            // Check if the message is JSON (but not an assistant message)
+            else if (isJsonString(message)) {
+                // Format JSON nicely
+                try {
+                    // Extract JSON part if there's a prefix
+                    let jsonStr = message;
+                    if (message.includes('🤖 CLAUDE JSON:')) {
+                        jsonStr = message.split('🤖 CLAUDE JSON:')[1].trim();
+                    }
+                    
+                    const jsonData = JSON.parse(jsonStr);
+                    const pre = document.createElement('pre');
+                    pre.style.backgroundColor = 'var(--vscode-editor-background)';
+                    pre.style.border = '1px solid var(--vscode-panel-border)';
+                    pre.style.borderRadius = '3px';
+                    pre.style.padding = '8px';
+                    pre.style.overflow = 'auto';
+                    pre.style.fontSize = '12px';
+                    pre.style.fontFamily = 'monospace';
+                    pre.style.margin = '4px 0';
+                    pre.textContent = JSON.stringify(jsonData, null, 2);
+                    logEntry.appendChild(pre);
+                } catch {
+                    // If formatting fails, fall back to paragraph
+                    const p = document.createElement('p');
+                    p.style.margin = '4px 0';
+                    p.textContent = message;
+                    logEntry.appendChild(p);
+                }
+            } else {
+                // Use paragraph for non-JSON messages
+                const p = document.createElement('p');
+                p.style.margin = '4px 0';
+                p.textContent = message;
+                logEntry.appendChild(p);
+            }
+            
             logContent.appendChild(logEntry);
             
             // Auto-scroll to bottom
@@ -121,9 +406,8 @@ export function getSidebarHtml(
         function restoreLogs(logs) {
             const logContent = document.getElementById('logContent');
             logs.forEach(message => {
-                const logEntry = document.createElement('div');
-                logEntry.textContent = message;
-                logContent.appendChild(logEntry);
+                // Use the same addLogMessage function to ensure consistent formatting
+                addLogMessage(message);
             });
             
             // Auto-scroll to bottom
