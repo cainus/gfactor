@@ -38,16 +38,43 @@ function copyTimestampFile() {
   }
 }
 
+// Function to copy webview files to dist directory
+function copyWebviewFiles() {
+  try {
+    // Create dist/webview directory if it doesn't exist
+    const webviewDistDir = './dist/webview';
+    if (!fs.existsSync(webviewDistDir)) {
+      fs.mkdirSync(webviewDistDir, { recursive: true });
+    }
+    
+    // Copy all files from src/webview to dist/webview
+    const webviewSrcDir = './src/webview';
+    if (fs.existsSync(webviewSrcDir)) {
+      const files = fs.readdirSync(webviewSrcDir);
+      files.forEach(file => {
+        const srcPath = path.join(webviewSrcDir, file);
+        const destPath = path.join(webviewDistDir, file);
+        fs.copyFileSync(srcPath, destPath);
+      });
+      console.log('Webview files copied to dist directory');
+    }
+  } catch (error) {
+    console.error('Error copying webview files:', error);
+  }
+}
+
 if (isWatch) {
   const context = esbuild.context(options);
   context.then(ctx => {
     ctx.watch();
     copyTimestampFile();
+    copyWebviewFiles();
     console.log('Watching for changes...');
   });
 } else {
   esbuild.build(options).then(() => {
     copyTimestampFile();
+    copyWebviewFiles();
     console.log('Build complete!');
   }).catch(() => process.exit(1));
 }
