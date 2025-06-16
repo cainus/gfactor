@@ -7,8 +7,6 @@ import { PatternOccurrence } from './types';
 import { RefactorFormData } from '../migration/types';
 import { Sidebar } from '../components/sidebar/Sidebar';
 import { BurndownChart } from '../components/burndown/BurndownChart';
-import { AssistantMessageFormatter } from '../components/sidebar/AssistantMessageFormatter';
-import { JsonFormatter } from '../components/sidebar/JsonFormatter';
 
 /**
  * Generates HTML for the main sidebar webview using React components
@@ -104,20 +102,10 @@ export function getSidebarHtml(
 <body>
     <div id="root">${reactHtml}</div>
     
-    <div id="log-container">
-        <div id="logWindow" style="max-height: 400px; overflow-y: auto; border: 1px solid var(--vscode-panel-border); margin-top: 20px;">
-            <div id="logContent"></div>
-        </div>
-    </div>
+    <!-- Load React and ReactDOM -->
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
     
-    <script>
-      // Make React components available to the client-side code
-      window.Components = {
-        AssistantMessageFormatter: ${AssistantMessageFormatter.toString().replace(/^function/, 'function')},
-        JsonFormatter: ${JsonFormatter.toString().replace(/^function/, 'function')}
-      };
-    </script>
-
     <!-- Load the client-side JavaScript -->
     <script src="${scriptUri}"></script>
 </body>

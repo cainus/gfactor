@@ -5,119 +5,54 @@
 // Initialize VS Code API
 const vscode = acquireVsCodeApi();
 
-// Function to extract JSON from a message, handling Claude prefix
-function extractJsonFromMessage(str) {
-    if (typeof str !== 'string') return null;
-    
-    // Check if the string has a prefix like "🤖 CLAUDE JSON:"
-    if (str.includes('🤖 CLAUDE JSON:')) {
-        try {
-            const jsonStr = str.split('🤖 CLAUDE JSON:')[1].trim();
-            return JSON.parse(jsonStr);
-        } catch (e) {
-            console.error('Error parsing JSON with Claude prefix:', e);
-            return null;
-        }
-    }
-    
-    // Try parsing as regular JSON
-    try {
-        return JSON.parse(str);
-    } catch (e) {
-        return null;
-    }
-}
-
-// Function to add log messages to the log window
-function addLogMessage(message) {
-    const logContent = document.getElementById('logContent');
-    if (!logContent) {
-        console.error('Log content element not found');
-        return;
-    }
-    
-    const logEntry = document.createElement('div');
-    
-    // Try to parse as JSON
-    const jsonData = extractJsonFromMessage(message);
-    
-    if (jsonData && jsonData.type === 'assistant' && jsonData.message) {
-        // It's an assistant message, use the React component
-        const container = document.createElement('div');
-        container.id = 'assistant-message-' + Date.now();
-        logEntry.appendChild(container);
-        
-        try {
-            ReactDOM.render(
-                React.createElement(window.Components.AssistantMessageFormatter, {
-                    jsonString: JSON.stringify(jsonData)
-                }),
-                container
-            );
-        } catch (error) {
-            console.error('Error rendering AssistantMessageFormatter:', error);
-            // Fall back to plain text
-            const p = document.createElement('p');
-            p.style.margin = '4px 0';
-            p.textContent = message;
-            logEntry.appendChild(p);
-        }
-    } else if (jsonData) {
-        // It's regular JSON, use the JsonFormatter component
-        const container = document.createElement('div');
-        container.id = 'json-message-' + Date.now();
-        logEntry.appendChild(container);
-        
-        try {
-            ReactDOM.render(
-                React.createElement(window.Components.JsonFormatter, {
-                    jsonString: JSON.stringify(jsonData)
-                }),
-                container
-            );
-        } catch (error) {
-            console.error('Error rendering JsonFormatter:', error);
-            // Fall back to plain text
-            const p = document.createElement('p');
-            p.style.margin = '4px 0';
-            p.textContent = message;
-            logEntry.appendChild(p);
-        }
-    } else {
-        // Plain text
-        const p = document.createElement('p');
-        p.style.margin = '4px 0';
-        p.textContent = message;
-        logEntry.appendChild(p);
-    }
-    
-    logContent.appendChild(logEntry);
-    
-    // Auto-scroll to bottom
-    const logWindow = document.getElementById('logWindow');
-    if (logWindow) logWindow.scrollTop = logWindow.scrollHeight;
+// Function to forward log messages to the React component
+function forwardLogMessage(message) {
+    console.log('Forwarding log message to React component');
     
     // Send message to extension to persist the log
     vscode.postMessage({
-        command: 'persistLog',
+        command: 'log',
         message: message
     });
 }
 
-// Function to restore saved logs - simplified
+// Function to add a log message to the React component
+function addLogMessage(message) {
+    console.log('Adding log message:', message);
+    
+    // Forward the message to the React component via the window message event
+    window.dispatchEvent(new MessageEvent('message', {
+        data: {
+            command: 'log',
+            message: message,
+            _source: 'sidebar-client'
+        }
+    }));
+    
+    // Also dispatch a custom event for the sidebar-react-app.tsx
+    window.dispatchEvent(new CustomEvent('vscode-log', {
+        detail: { message: message }
+    }));
+    
+    // Also send to extension to persist the log
+    vscode.postMessage({
+        command: 'log',
+        message: message
+    });
+}
+
+// Function to restore logs in the React component
 function restoreLogs(logs) {
-    if (!logs || !Array.isArray(logs)) return;
+    console.log('Restoring logs:', logs);
     
-    const logContent = document.getElementById('logContent');
-    if (!logContent) return;
-    
-    // Clear existing logs and add each log message
-    logContent.innerHTML = '';
-    logs.forEach(addLogMessage);
-    
-    // Auto-scroll to bottom
-    const logWindow = document.getElementById('logWindow');
-    if (logWindow) logWindow.scrollTop = logWindow.scrollHeight;
+    // Forward the logs to the React component via the window message event
+    window.dispatchEvent(new MessageEvent('message', {
+        data: {
+            command: 'restoreLogs',
+            logs: logs,
+            _source: 'sidebar-client'
+        }
+    }));
 }
 
 // Function to collect and save refactor form data
@@ -209,7 +144,10 @@ function setMigrationRunningState(isRunning) {
     // Handle action buttons visibility
     ['countFiles', 'migrateOneFile', 'migrateAllFiles'].forEach(id => {
         const button = document.getElementById(id);
-        if (button) button.classList.toggle('hidden', isRunning);
+        if (button) {
+            button.classList.toggle('hidden', isRunning);
+            button.style.display = isRunning ? 'none' : 'block';
+        }
     });
     
     // Handle stop button visibility and state
@@ -221,11 +159,13 @@ function setMigrationRunningState(isRunning) {
     }
     
     // Log button state change
-    const message = isRunning 
-        ? '🔴 CANCEL BUTTON: Showing cancel button 🔴' 
+    const message = isRunning
+        ? '🔴 CANCEL BUTTON: Showing cancel button 🔴'
         : '🔴 CANCEL BUTTON: Hiding cancel button 🔴';
     
+    // Add log message directly
     addLogMessage(message);
+    
     vscode.postMessage({
         command: 'logButtonState',
         message: message
@@ -314,19 +254,36 @@ document.addEventListener('DOMContentLoaded', () => {
 window.addEventListener('message', event => {
     const message = event.data;
     
+    // Skip messages that originated from this script to avoid infinite loops
+    if (message._source === 'sidebar-client') {
+        return;
+    }
+    
+    console.log('Received message from extension:', message.command);
+    
     switch (message.command) {
         case 'log':
+            // Add log message directly
             addLogMessage(message.message);
             break;
         case 'migrationComplete':
             setMigrationRunningState(false);
             break;
         case 'restoreLogs':
+            // Restore logs directly
             restoreLogs(message.logs);
             break;
         case 'clearLogs':
-            const logContent = document.getElementById('logContent');
-            if (logContent) logContent.innerHTML = '';
+            // Clear logs directly using both approaches
+            window.dispatchEvent(new MessageEvent('message', {
+                data: {
+                    command: 'clearLogs',
+                    _source: 'sidebar-client'
+                }
+            }));
+            
+            // Also dispatch a custom event for the sidebar-react-app.tsx
+            window.dispatchEvent(new CustomEvent('vscode-clear-logs'));
             break;
     }
 });
