@@ -16,6 +16,21 @@ function forwardLogMessage(message) {
     });
 }
 
+// Function to scroll to the bottom of the log content
+function scrollToBottom() {
+    try {
+        const logContent = document.getElementById('logContent');
+        if (logContent) {
+            logContent.scrollTop = logContent.scrollHeight;
+            console.log('SIDEBAR-CLIENT: Scrolled to bottom');
+        } else {
+            console.log('SIDEBAR-CLIENT: Could not find logContent element to scroll');
+        }
+    } catch (error) {
+        console.error('SIDEBAR-CLIENT: Error scrolling to bottom:', error);
+    }
+}
+
 // Function to add a log message to the React component
 function addLogMessage(message) {
     console.log('SIDEBAR-CLIENT: Adding log message:', message);
@@ -30,6 +45,9 @@ function addLogMessage(message) {
             logElement.style.margin = '4px 0';
             logElement.style.color = 'var(--vscode-foreground)';
             logContent.appendChild(logElement);
+            
+            // Scroll to bottom after adding the log
+            scrollToBottom();
         } else {
             console.log('SIDEBAR-CLIENT: logContent element not found');
         }
@@ -76,6 +94,9 @@ function restoreLogs(logs) {
             _source: 'sidebar-client'
         }
     }));
+    
+    // Scroll to bottom after logs are restored
+    setTimeout(scrollToBottom, 100); // Small delay to ensure logs are rendered
 }
 
 // Function to collect and save refactor form data
@@ -343,6 +364,16 @@ window.addEventListener('message', event => {
             
             // Also dispatch a custom event for the sidebar-react-app.tsx
             window.dispatchEvent(new CustomEvent('vscode-clear-logs'));
+            
+            // No need to scroll after clearing, but reset scroll position to top
+            try {
+                const logContent = document.getElementById('logContent');
+                if (logContent) {
+                    logContent.scrollTop = 0;
+                }
+            } catch (error) {
+                console.error('SIDEBAR-CLIENT: Error resetting scroll position:', error);
+            }
             break;
     }
 });

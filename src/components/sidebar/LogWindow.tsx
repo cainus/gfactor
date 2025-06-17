@@ -14,9 +14,32 @@ export const LogWindow: React.FC<LogWindowProps> = ({
   // Use a ref for the log content div
   const logContentRef = React.useRef<HTMLDivElement>(null);
   
+  // Function to scroll to the bottom of the log content
+  const scrollToBottom = React.useCallback(() => {
+    try {
+      if (logContentRef.current) {
+        logContentRef.current.scrollTop = logContentRef.current.scrollHeight;
+        console.log('LOGWINDOW: Scrolled to bottom');
+      } else {
+        const logContent = document.getElementById('logContent');
+        if (logContent) {
+          logContent.scrollTop = logContent.scrollHeight;
+          console.log('LOGWINDOW: Scrolled to bottom via getElementById');
+        } else {
+          console.log('LOGWINDOW: Could not find log content element to scroll');
+        }
+      }
+    } catch (error) {
+      console.error('LOGWINDOW: Error scrolling to bottom:', error);
+    }
+  }, []);
+  
   // Add a log message directly to the DOM after component mounts
   React.useEffect(() => {
     console.log('LOGWINDOW: Component mounted');
+    
+    // Create a cleanup function that will be populated if we set up an observer
+    let cleanup: (() => void) | undefined;
     
     // Try to add a log message directly to the DOM
     try {
@@ -27,6 +50,7 @@ export const LogWindow: React.FC<LogWindowProps> = ({
         logElement.style.margin = '4px 0';
         logElement.style.color = 'var(--vscode-foreground)';
         logContentRef.current.appendChild(logElement);
+        scrollToBottom();
       } else {
         console.log('LOGWINDOW: logContentRef is not available');
       }
@@ -44,13 +68,41 @@ export const LogWindow: React.FC<LogWindowProps> = ({
         logElement.style.margin = '4px 0';
         logElement.style.color = 'var(--vscode-foreground)';
         logContent.appendChild(logElement);
+        scrollToBottom();
       } else {
         console.log('LOGWINDOW: Could not find logContent by ID');
       }
     } catch (error) {
       console.error('LOGWINDOW: Error finding logContent by ID:', error);
     }
-  }, []);
+    
+    // Set up a MutationObserver to detect when logs are added and scroll to bottom
+    try {
+      const logContent = logContentRef.current || document.getElementById('logContent');
+      if (logContent) {
+        console.log('LOGWINDOW: Setting up MutationObserver');
+        const observer = new MutationObserver((mutations) => {
+          // If nodes were added, scroll to bottom
+          if (mutations.some(mutation => mutation.addedNodes.length > 0)) {
+            console.log('LOGWINDOW: Logs added, scrolling to bottom');
+            scrollToBottom();
+          }
+        });
+        
+        observer.observe(logContent, { childList: true });
+        
+        // Set the cleanup function
+        cleanup = () => {
+          observer.disconnect();
+        };
+      }
+    } catch (error) {
+      console.error('LOGWINDOW: Error setting up MutationObserver:', error);
+    }
+    
+    // Return the cleanup function or undefined
+    return cleanup;
+  }, [scrollToBottom]);
   
   // Create a very simple component with hardcoded logs and an ID for direct DOM manipulation
   return (
