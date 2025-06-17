@@ -1,38 +1,4 @@
 import * as React from 'react';
-import { styles } from '../styles';
-import { AssistantMessageFormatter } from './AssistantMessageFormatter';
-import { JsonFormatter } from './JsonFormatter';
-
-// Define VS Code API types
-interface VSCodeMessage {
-  command: string;
-  [key: string]: unknown;
-}
-
-declare function acquireVsCodeApi(): {
-  postMessage: (message: VSCodeMessage) => void;
-  setState: (state: unknown) => void;
-  getState: () => unknown;
-};
-
-// Define JSON data types
-interface AssistantJsonData {
-  type: 'assistant';
-  message: string;
-  [key: string]: unknown;
-}
-
-interface GenericJsonData {
-  [key: string]: unknown;
-}
-
-// Define log message types
-interface LogMessage {
-  id: string;
-  content: string;
-  jsonData?: AssistantJsonData | GenericJsonData;
-  type: 'text' | 'assistant' | 'json';
-}
 
 interface LogWindowProps {
   packageVersion: string;
@@ -43,173 +9,94 @@ export const LogWindow: React.FC<LogWindowProps> = ({
   packageVersion,
   timestampContent
 }) => {
-  // State for log messages
-  const [logs, setLogs] = React.useState<LogMessage[]>([]);
-  const logWindowRef = React.useRef<HTMLDivElement>(null);
+  console.log('LOGWINDOW: Rendering LogWindow component');
   
-  // Function to extract JSON from a message
-  const extractJsonFromMessage = React.useCallback((str: string) => {
-    if (typeof str !== 'string') return null;
+  // Use a ref for the log content div
+  const logContentRef = React.useRef<HTMLDivElement>(null);
+  
+  // Add a log message directly to the DOM after component mounts
+  React.useEffect(() => {
+    console.log('LOGWINDOW: Component mounted');
     
-    // Check if the string has a prefix like "🤖 CLAUDE JSON:" or "🤖 CLAUDE ASSISTANT:"
-    if (str.includes('🤖 CLAUDE JSON:')) {
-      try {
-        const jsonStr = str.split('🤖 CLAUDE JSON:')[1].trim();
-        return JSON.parse(jsonStr);
-      // eslint-disable-next-line @typescript-eslint/no-unused-vars
-      } catch (_e) {
-        console.error('Error parsing JSON with Claude JSON prefix');
-        return null;
+    // Try to add a log message directly to the DOM
+    try {
+      if (logContentRef.current) {
+        console.log('LOGWINDOW: logContentRef is available, adding log directly');
+        const logElement = document.createElement('p');
+        logElement.textContent = 'LOG FROM USEEFFECT: Added directly to DOM at ' + new Date().toISOString();
+        logElement.style.margin = '4px 0';
+        logElement.style.color = 'var(--vscode-foreground)';
+        logContentRef.current.appendChild(logElement);
+      } else {
+        console.log('LOGWINDOW: logContentRef is not available');
       }
-    } else if (str.includes('🤖 CLAUDE ASSISTANT:')) {
-      try {
-        const jsonStr = str.split('🤖 CLAUDE ASSISTANT:')[1].trim();
-        return JSON.parse(jsonStr);
-      // eslint-disable-next-line @typescript-eslint/no-unused-vars
-      } catch (_e) {
-        console.error('Error parsing JSON with Claude ASSISTANT prefix');
-        return null;
-      }
+    } catch (error) {
+      console.error('LOGWINDOW: Error adding log directly:', error);
     }
     
-    // Try parsing as regular JSON
+    // Try to find the logContent element by ID
     try {
-      return JSON.parse(str);
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    } catch (_e) {
-      return null;
+      const logContent = document.getElementById('logContent');
+      if (logContent) {
+        console.log('LOGWINDOW: Found logContent by ID, adding log directly');
+        const logElement = document.createElement('p');
+        logElement.textContent = 'LOG FROM GETELEMENTBYID: Added directly to DOM at ' + new Date().toISOString();
+        logElement.style.margin = '4px 0';
+        logElement.style.color = 'var(--vscode-foreground)';
+        logContent.appendChild(logElement);
+      } else {
+        console.log('LOGWINDOW: Could not find logContent by ID');
+      }
+    } catch (error) {
+      console.error('LOGWINDOW: Error finding logContent by ID:', error);
     }
   }, []);
   
-  // Function to add a log message
-  const addLogMessage = React.useCallback((message: string) => {
-    console.log('LogWindow: Adding log message');
-    
-    const jsonData = extractJsonFromMessage(message);
-    const id = `log-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
-    
-    let type: 'text' | 'assistant' | 'json' = 'text';
-    if (jsonData && jsonData.type === 'assistant' && jsonData.message) {
-      type = 'assistant';
-    } else if (jsonData) {
-      type = 'json';
-    }
-    
-    setLogs(prevLogs => [...prevLogs, { id, content: message, jsonData, type }]);
-    
-    // Auto-scroll to bottom
-    setTimeout(() => {
-      if (logWindowRef.current) {
-        logWindowRef.current.scrollTop = logWindowRef.current.scrollHeight;
-      }
-    }, 0);
-  }, [extractJsonFromMessage]);
-  
-  // Effect to set up message listener
-  React.useEffect(() => {
-    console.log('LogWindow: Setting up message listener');
-    
-    // Get VS Code API
-    const vscode = acquireVsCodeApi();
-    
-    // Handle messages from the extension
-    const messageHandler = (event: MessageEvent) => {
-      const message = event.data;
-      
-      switch (message.command) {
-        case 'log':
-          console.log('LogWindow: Received log message');
-          addLogMessage(message.message);
-          break;
-        case 'restoreLogs':
-          console.log('LogWindow: Restoring logs');
-          if (message.logs && Array.isArray(message.logs)) {
-            const processedLogs = message.logs.map((logMsg: string) => {
-              const jsonData = extractJsonFromMessage(logMsg);
-              const id = `log-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
-              
-              let type: 'text' | 'assistant' | 'json' = 'text';
-              if (jsonData && jsonData.type === 'assistant' && jsonData.message) {
-                type = 'assistant';
-              } else if (jsonData) {
-                type = 'json';
-              }
-              
-              return { id, content: logMsg, jsonData, type };
-            });
-            
-            setLogs(processedLogs);
-            
-            // Auto-scroll to bottom
-            setTimeout(() => {
-              if (logWindowRef.current) {
-                logWindowRef.current.scrollTop = logWindowRef.current.scrollHeight;
-              }
-            }, 0);
-          }
-          break;
-        case 'clearLogs':
-          console.log('LogWindow: Clearing logs');
-          setLogs([]);
-          break;
-      }
-    };
-    
-    window.addEventListener('message', messageHandler);
-    
-    // Add initial log message
-    addLogMessage('Log system initialized at ' + new Date().toISOString());
-    
-    // Request saved logs from the extension
-    vscode.postMessage({
-      command: 'requestLogs'
-    });
-    
-    // Cleanup
-    return () => {
-      window.removeEventListener('message', messageHandler);
-    };
-  }, [addLogMessage, extractJsonFromMessage]);
-  
-  // Render log messages
-  const renderLogMessage = (log: LogMessage) => {
-    if (log.type === 'assistant' && log.jsonData) {
-      return (
-        <AssistantMessageFormatter
-          key={log.id}
-          jsonString={JSON.stringify(log.jsonData)}
-        />
-      );
-    } else if (log.type === 'json' && log.jsonData) {
-      return (
-        <JsonFormatter
-          key={log.id}
-          jsonString={JSON.stringify(log.jsonData)}
-        />
-      );
-    } else {
-      return (
-        <p key={log.id} style={{ margin: '4px 0', color: 'var(--vscode-foreground)' }}>
-          {log.content}
-        </p>
-      );
-    }
-  };
-  
+  // Create a very simple component with hardcoded logs and an ID for direct DOM manipulation
   return (
-    <div id="logWindow" ref={logWindowRef} style={styles.logWindow}>
-      <div style={styles.logHeader}>
+    <div style={{
+      border: '1px solid var(--vscode-panel-border)',
+      padding: '10px',
+      marginTop: '10px'
+    }}>
+      <div style={{
+        display: 'flex',
+        justifyContent: 'space-between',
+        marginBottom: '10px'
+      }}>
         <h3 style={{ margin: 0 }}>Log Output</h3>
-        <div style={styles.logVersion}>v{packageVersion} | {timestampContent}</div>
+        <div>v{packageVersion} | {timestampContent}</div>
       </div>
-      <div id="logContent">
-        {logs.length === 0 ? (
-          <p style={{ fontStyle: 'italic', color: 'var(--vscode-descriptionForeground)' }}>
-            No log messages yet
-          </p>
-        ) : (
-          logs.map(renderLogMessage)
-        )}
+      
+      <div
+        id="logContent"
+        ref={logContentRef}
+        style={{
+          maxHeight: '300px',
+          overflowY: 'auto',
+          border: '1px solid var(--vscode-panel-border)',
+          padding: '10px',
+          backgroundColor: 'var(--vscode-editor-background)'
+        }}
+      >
+        <p style={{ margin: '4px 0', color: 'var(--vscode-foreground)' }}>
+          HARDCODED LOG 1: This is a hardcoded log message
+        </p>
+        <p style={{ margin: '4px 0', color: 'var(--vscode-foreground)' }}>
+          HARDCODED LOG 2: This is another hardcoded log message
+        </p>
+      </div>
+      
+      <div style={{
+        marginTop: '10px',
+        padding: '10px',
+        backgroundColor: 'rgba(255, 0, 0, 0.1)',
+        border: '1px solid red',
+        borderRadius: '4px'
+      }}>
+        <p><strong>DEBUGGING INFO</strong></p>
+        <p>This component has a div with id="logContent" for direct DOM manipulation.</p>
+        <p>Check the console for debugging messages.</p>
       </div>
     </div>
   );

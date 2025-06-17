@@ -35,19 +35,41 @@ export function clearLogs(): void {
 
 // Log message to console, output channel, and webview
 export function logMessage(message: string): void {
-  console.log(message);
+  console.log('LOGGING:', message);
   
   // Log to output channel - no timestamps
   if (outputChannel) {
     outputChannel.appendLine(message);
   }
   
-  // Log to webview if available - no timestamps
+  // Log to webview if available
   if (sidebarWebview) {
-    sidebarWebview.postMessage({
-      command: 'log',
-      message: message
-    });
+    console.log('SENDING TO WEBVIEW:', message);
+    try {
+      // Send a test message to verify the webview is working
+      sidebarWebview.postMessage({
+        command: 'test',
+        message: 'This is a test message'
+      });
+      
+      // Send the actual log message
+      sidebarWebview.postMessage({
+        command: 'log',
+        message: message
+      });
+      
+      // Try with a different command
+      sidebarWebview.postMessage({
+        command: 'directLog',
+        message: 'DIRECT: ' + message
+      });
+      
+      console.log('MESSAGES SENT TO WEBVIEW');
+    } catch (error) {
+      console.error('ERROR SENDING TO WEBVIEW:', error);
+    }
+  } else {
+    console.log('WEBVIEW NOT AVAILABLE');
   }
 }
 

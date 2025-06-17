@@ -7,7 +7,7 @@ const vscode = acquireVsCodeApi();
 
 // Function to forward log messages to the React component
 function forwardLogMessage(message) {
-    console.log('Forwarding log message to React component');
+    console.log('Forwarding log message to React component:', message);
     
     // Send message to extension to persist the log
     vscode.postMessage({
@@ -18,34 +18,57 @@ function forwardLogMessage(message) {
 
 // Function to add a log message to the React component
 function addLogMessage(message) {
-    console.log('Adding log message:', message);
+    console.log('SIDEBAR-CLIENT: Adding log message:', message);
     
-    // Forward the message to the React component via the window message event
-    window.dispatchEvent(new MessageEvent('message', {
-        data: {
-            command: 'log',
-            message: message,
-            _source: 'sidebar-client'
+    try {
+        // Try to directly modify the DOM
+        const logContent = document.getElementById('logContent');
+        if (logContent) {
+            console.log('SIDEBAR-CLIENT: Found logContent element, adding log directly to DOM');
+            const logElement = document.createElement('p');
+            logElement.textContent = message;
+            logElement.style.margin = '4px 0';
+            logElement.style.color = 'var(--vscode-foreground)';
+            logContent.appendChild(logElement);
+        } else {
+            console.log('SIDEBAR-CLIENT: logContent element not found');
         }
-    }));
-    
-    // Also dispatch a custom event for the sidebar-react-app.tsx
-    window.dispatchEvent(new CustomEvent('vscode-log', {
-        detail: { message: message }
-    }));
-    
-    // Also send to extension to persist the log
-    vscode.postMessage({
-        command: 'log',
-        message: message
-    });
+        
+        // Forward the message to the React component via the window message event
+        console.log('SIDEBAR-CLIENT: Dispatching message event');
+        window.dispatchEvent(new MessageEvent('message', {
+            data: {
+                command: 'log',
+                message: message,
+                _source: 'sidebar-client'
+            }
+        }));
+        
+        // Also dispatch a custom event for the sidebar-react-app.tsx
+        console.log('SIDEBAR-CLIENT: Dispatching vscode-log custom event');
+        window.dispatchEvent(new CustomEvent('vscode-log', {
+            detail: { message: message }
+        }));
+        
+        // Also send to extension to persist the log
+        console.log('SIDEBAR-CLIENT: Sending message back to extension');
+        vscode.postMessage({
+            command: 'log',
+            message: message
+        });
+        
+        console.log('SIDEBAR-CLIENT: Log message processing complete');
+    } catch (error) {
+        console.error('SIDEBAR-CLIENT: Error in addLogMessage:', error);
+    }
 }
 
 // Function to restore logs in the React component
 function restoreLogs(logs) {
-    console.log('Restoring logs:', logs);
+    console.log('sidebar-client: Restoring logs:', logs ? logs.length : 0);
     
     // Forward the logs to the React component via the window message event
+    console.log('sidebar-client: Dispatching restoreLogs message event');
     window.dispatchEvent(new MessageEvent('message', {
         data: {
             command: 'restoreLogs',
@@ -250,19 +273,55 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 });
 
+// Add a test log message after a delay to ensure everything is initialized
+setTimeout(() => {
+    console.log('Adding test log message after delay');
+    addLogMessage('TEST: Log message added after delay at ' + new Date().toISOString());
+}, 2000);
+
+// Add a test log message after a delay to ensure everything is initialized
+setTimeout(() => {
+    console.log('SIDEBAR-CLIENT: Adding test log message after delay');
+    addLogMessage('TEST FROM SIDEBAR-CLIENT: Log message added after delay at ' + new Date().toISOString());
+}, 2000);
+
 // Handle messages from the extension
 window.addEventListener('message', event => {
     const message = event.data;
     
     // Skip messages that originated from this script to avoid infinite loops
     if (message._source === 'sidebar-client') {
+        console.log('SIDEBAR-CLIENT: Skipping message from self');
         return;
     }
     
-    console.log('Received message from extension:', message.command);
+    console.log('SIDEBAR-CLIENT: Received message from extension:', message.command, message);
     
     switch (message.command) {
+        case 'test':
+            console.log('SIDEBAR-CLIENT: Received test message:', message.message);
+            // Add a visible element to the DOM to show the test message
+            try {
+                const testElement = document.createElement('div');
+                testElement.style.padding = '10px';
+                testElement.style.margin = '10px 0';
+                testElement.style.backgroundColor = 'red';
+                testElement.style.color = 'white';
+                testElement.style.fontWeight = 'bold';
+                testElement.textContent = 'TEST MESSAGE RECEIVED: ' + message.message;
+                document.body.appendChild(testElement);
+                console.log('SIDEBAR-CLIENT: Added test element to DOM');
+            } catch (error) {
+                console.error('SIDEBAR-CLIENT: Error adding test element:', error);
+            }
+            break;
         case 'log':
+            console.log('SIDEBAR-CLIENT: Received log message:', message.message);
+            // Add log message directly
+            addLogMessage(message.message);
+            break;
+        case 'directLog':
+            console.log('SIDEBAR-CLIENT: Received direct log message:', message.message);
             // Add log message directly
             addLogMessage(message.message);
             break;
