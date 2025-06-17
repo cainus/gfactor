@@ -1,15 +1,19 @@
-After every change, 
+For the view level
+* We want maximum react usage
+* We want minimal programmatic dom manipulation
+* we want minimal html in strings
 
-Put the current date time in the title of the extension panel to mark when it was compiled.
 
-Make sure we're logging the current date/time as a static string (not dynamic) when the extension panel first shows up.
-
-then verify the change with:
+To verify changes:
 
 npm run lint && npm run check-types && npm run compile
 
-Then create a package with:
+To create a package:
 
 npm run deploy
+
+
+Make sure to verify changes and create a package after every change.
+
 
 
