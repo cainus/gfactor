@@ -79,25 +79,8 @@ export const LogWindow: React.FC<LogWindowProps> = ({
           backgroundColor: 'var(--vscode-editor-background)'
         }}
       >
-        <p style={{ margin: '4px 0', color: 'var(--vscode-foreground)' }}>
-          HARDCODED LOG 1: This is a hardcoded log message
-        </p>
-        <p style={{ margin: '4px 0', color: 'var(--vscode-foreground)' }}>
-          HARDCODED LOG 2: This is another hardcoded log message
-        </p>
       </div>
       
-      <div style={{
-        marginTop: '10px',
-        padding: '10px',
-        backgroundColor: 'rgba(255, 0, 0, 0.1)',
-        border: '1px solid red',
-        borderRadius: '4px'
-      }}>
-        <p><strong>DEBUGGING INFO</strong></p>
-        <p>This component has a div with id="logContent" for direct DOM manipulation.</p>
-        <p>Check the console for debugging messages.</p>
-      </div>
     </div>
   );
 };

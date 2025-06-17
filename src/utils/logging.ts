@@ -46,12 +46,6 @@ export function logMessage(message: string): void {
   if (sidebarWebview) {
     console.log('SENDING TO WEBVIEW:', message);
     try {
-      // Send a test message to verify the webview is working
-      sidebarWebview.postMessage({
-        command: 'test',
-        message: 'This is a test message'
-      });
-      
       // Send the actual log message
       sidebarWebview.postMessage({
         command: 'log',
