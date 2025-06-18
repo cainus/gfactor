@@ -1,49 +1,232 @@
 import * as vscode from 'vscode';
+import * as childProcess from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
-import * as glob from 'glob';
-import * as childProcess from 'child_process';
-// import * as util from 'util'; // Unused import
-import * as MarkdownIt from 'markdown-it';
-import { GoogleGenerativeAI } from '@google/generative-ai';
-import { Anthropic } from '@anthropic-ai/sdk';
+import { logMessage, initializeLogging, setSidebarWebview, clearLogs } from './utils/logging';
+import { collectMdcContext } from './utils/file-utils';
+import { saveApiKeys, getLlmConfig } from './utils/config-manager';
+import { MigrationService } from './migration/migration-service';
+import { RefactorFormData } from './migration/types';
+import { getSidebarHtml, getBurndownChartHtml } from './utils/html-generator';
 
-// Interfaces
-interface RefactorFormData {
-    compilerLinterCommand: string;
-    testCommand: string;
-    filePatterns: string;
-    findPattern: string;
-    replacePattern: string;
-    stopOption: 'afterEachFix' | 'afterEachFile' | 'onlyWhenComplete';
+// Cancellation token source for stopping migrations
+let migrationCancellationTokenSource: vscode.CancellationTokenSource | undefined;
+
+// Storage keys
+const FORM_DATA_STORAGE_KEY = 'gfactor.formData';
+const FORM_DISPLAY_STATE_KEY = 'gfactor.formDisplayState';
+const LOG_STORAGE_KEY = 'gfactor.logs';
+
+// Store logs in memory for persistence
+let logMessages: string[] = [];
+
+// Global variables
+let extensionContext: vscode.ExtensionContext;
+let sidebarWebview: vscode.Webview | undefined;
+let migrationService: MigrationService;
+
+// Sidebar webview provider
+class GFactorSidebarProvider implements vscode.WebviewViewProvider {
+    constructor(private readonly _extensionUri: vscode.Uri) {}
+
+    public resolveWebviewView(
+        webviewView: vscode.WebviewView,
+        _context: vscode.WebviewViewResolveContext,
+        _token: vscode.CancellationToken
+    ): void {
+        webviewView.webview.options = {
+            enableScripts: true,
+            localResourceRoots: [this._extensionUri]
+        };
+
+        // Store the webview reference for logging
+        sidebarWebview = webviewView.webview;
+        setSidebarWebview(webviewView.webview);
+        
+        // Restore logs from extension context when webview is created
+        const context = getExtensionContext();
+        logMessages = context.globalState.get<string[]>(LOG_STORAGE_KEY) || [];
+        
+        // Get package version
+        let packageVersion = "1.0.0"; // Default fallback
+        try {
+            const packageJsonPath = path.join(this._extensionUri.fsPath, 'package.json');
+            const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, 'utf8'));
+            packageVersion = packageJson.version;
+        } catch (error) {
+            console.error('Error reading package.json:', error);
+        }
+        
+        // Read timestamp from file for logging
+        let formattedTimestamp = "June 10, 2025, 3:00 PM"; // Default fallback
+        try {
+            // Try multiple locations for timestamp.txt
+            let timestampContent;
+            
+            // First try: workspace folder
+            if (vscode.workspace.workspaceFolders && vscode.workspace.workspaceFolders.length > 0) {
+                try {
+                    const workspaceTimestampPath = path.join(vscode.workspace.workspaceFolders[0].uri.fsPath, 'timestamp.txt');
+                    timestampContent = fs.readFileSync(workspaceTimestampPath, 'utf8').trim();
+                    console.log('Found timestamp.txt in workspace folder');
+                } catch {
+                    // Workspace folder failed, continue to next location
+                }
+            }
+            
+            // Second try: extension directory
+            if (!timestampContent) {
+                try {
+                    const extensionTimestampPath = path.join(this._extensionUri.fsPath, 'timestamp.txt');
+                    timestampContent = fs.readFileSync(extensionTimestampPath, 'utf8').trim();
+                    console.log('Found timestamp.txt in extension directory');
+                } catch {
+                    // Extension directory failed, continue to next location
+                }
+            }
+            
+            // Third try: dist directory
+            if (!timestampContent) {
+                try {
+                    const distTimestampPath = path.join(this._extensionUri.fsPath, 'dist', 'timestamp.txt');
+                    timestampContent = fs.readFileSync(distTimestampPath, 'utf8').trim();
+                    console.log('Found timestamp.txt in dist directory');
+                } catch {
+                    // Dist directory failed, use default
+                }
+            }
+            
+            // Use the timestamp content if found
+            if (timestampContent) {
+                formattedTimestamp = timestampContent;
+            }
+        } catch (error) {
+            console.error('Error reading timestamp file:', error);
+        }
+        
+        // Log the current date/time as a static string when the extension panel first shows up
+        logMessage(`Extension panel opened - v${packageVersion} | ${formattedTimestamp}`);
+        
+        webviewView.webview.html = this._getHtmlForWebview(webviewView.webview);
+
+        // Handle messages from the webview
+        webviewView.webview.onDidReceiveMessage(async (message) => {
+            switch (message.command) {
+                case 'saveFormData': {
+                    // Save form data to global state
+                    const context = getExtensionContext();
+                    context.globalState.update(FORM_DATA_STORAGE_KEY, message.data);
+                    console.log('Form data saved in real-time:', message.data);
+                    break;
+                }
+                case 'saveDisplayState': {
+                    // Save form display state to global state
+                    const context = getExtensionContext();
+                    context.globalState.update(FORM_DISPLAY_STATE_KEY, message.data);
+                    console.log('Form display state saved:', message.data);
+                    break;
+                }
+                case 'saveApiKeys': {
+                    await saveApiKeys(message.data.llmType, message.data.apiKey);
+                    webviewView.webview.html = this._getHtmlForWebview(webviewView.webview);
+                    break;
+                }
+                case 'runRefactor': {
+                    await runRefactorWithData(message.data);
+                    break;
+                }
+                case 'stopMigration': {
+                    stopMigration();
+                    break;
+                }
+                case 'showBurndownChart': {
+                    vscode.commands.executeCommand('gfactor.showBurndownChart');
+                    break;
+                }
+                case 'logButtonState': {
+                    // Log button state changes to the output channel
+                    logMessage(message.message);
+                    // Also add to the in-memory log array for persistence
+                    logMessages.push(message.message);
+                    const extContext = getExtensionContext();
+                    extContext.globalState.update(LOG_STORAGE_KEY, logMessages);
+                    break;
+                }
+                case 'persistLog': {
+                    // Persist log message to extension context
+                    logMessages.push(message.message);
+                    const extContext = getExtensionContext();
+                    extContext.globalState.update(LOG_STORAGE_KEY, logMessages);
+                    break;
+                }
+                case 'requestLogs': {
+                    // Send saved logs to the webview
+                    webviewView.webview.postMessage({
+                        command: 'restoreLogs',
+                        logs: logMessages
+                    });
+                    break;
+                }
+            }
+        });
+    }
+
+    private _getHtmlForWebview(webview: vscode.Webview): string {
+        // Get saved form data, display state, and logs if available
+        const context = getExtensionContext();
+        const savedFormData = context.globalState.get<RefactorFormData | undefined>(FORM_DATA_STORAGE_KEY);
+        const displayState = context.globalState.get<{apiKeysForm: boolean}>(FORM_DISPLAY_STATE_KEY) ||
+            { apiKeysForm: false };
+        
+        // Get saved logs
+        logMessages = context.globalState.get<string[]>(LOG_STORAGE_KEY) || [];
+        
+        // Get API key information
+        const config = vscode.workspace.getConfiguration('gfactor');
+        // Get API key information for display purposes
+        const hasClaudeKey = !!config.get<string>('claudeApiKey');
+        
+        // Use the HTML generator to get the sidebar HTML
+        return getSidebarHtml(
+            webview,
+            this._extensionUri,
+            savedFormData,
+            displayState,
+            hasClaudeKey
+        );
+    }
 }
-
-interface LlmConfig {
-    type: 'gemini' | 'claude';
-    apiKey: string;
-}
-
-// Interface for pattern tracking
-interface PatternOccurrence {
-    timestamp: Date;
-    count: number;
-    file?: string;
-}
-
-// Global state to track pattern occurrences
-let patternOccurrences: PatternOccurrence[] = [];
 
 // This method is called when your extension is activated
 export function activate(context: vscode.ExtensionContext): void {
     console.log('GFactor extension is now active');
+    
+    // Store context for use in other functions
+    extensionContext = context;
+    
+    // Initialize logging
+    initializeLogging(context);
+    
+    // Initialize migration service
+    migrationService = new MigrationService();
+    
+    // Make sure the output channel is visible and focused
+    vscode.commands.executeCommand('workbench.action.output.show').then(() => {
+        vscode.commands.executeCommand('workbench.action.focusPanel');
+        // Select the GFactor output channel
+        vscode.commands.executeCommand('workbench.output.action.switchBetweenOutputs', 'GFactor');
+    });
+    
+    // Check if Claude CLI is installed
+    checkClaudeCliInstallation();
 
-    // Register the commands
-    const startRefactorCommand = vscode.commands.registerCommand('gfactor.startRefactor', () => {
-        startRefactor(context);
+    // Register the commands - just focus the sidebar view
+    const startRefactorCommand = vscode.commands.registerCommand('gfactor.startRefactor', async () => {
+        await vscode.commands.executeCommand('workbench.view.extension.gfactor-sidebar');
     });
 
-    const configureApiKeysCommand = vscode.commands.registerCommand('gfactor.configureApiKeys', () => {
-        configureApiKeys(context);
+    const configureApiKeysCommand = vscode.commands.registerCommand('gfactor.configureApiKeys', async () => {
+        await vscode.commands.executeCommand('workbench.view.extension.gfactor-sidebar');
     });
 
     const showBurndownChartCommand = vscode.commands.registerCommand('gfactor.showBurndownChart', () => {
@@ -51,6 +234,12 @@ export function activate(context: vscode.ExtensionContext): void {
     });
 
     context.subscriptions.push(startRefactorCommand, configureApiKeysCommand, showBurndownChartCommand);
+
+    // Register the sidebar webview provider
+    const sidebarProvider = new GFactorSidebarProvider(context.extensionUri);
+    context.subscriptions.push(
+        vscode.window.registerWebviewViewProvider('gfactorView', sidebarProvider)
+    );
 
     // Check if API keys are configured on startup
     checkApiKeyConfiguration(context);
@@ -60,515 +249,224 @@ export function activate(context: vscode.ExtensionContext): void {
 export function deactivate(): void {}
 
 // Check if API keys are configured
-async function checkApiKeyConfiguration(context: vscode.ExtensionContext): Promise<void> {
+async function checkApiKeyConfiguration(_context: vscode.ExtensionContext): Promise<void> {
     const config = vscode.workspace.getConfiguration('gfactor');
-    const geminiApiKey = config.get<string>('geminiApiKey');
     const claudeApiKey = config.get<string>('claudeApiKey');
 
-    if (!geminiApiKey && !claudeApiKey) {
+    if (!claudeApiKey) {
+        logMessage('⚠️ WARNING: GFactor requires an API key for Claude to function.');
+        
+        // Still show a dialog for this critical configuration
         const configureNow = 'Configure Now';
         const response = await vscode.window.showInformationMessage(
-            'GFactor requires API keys for Gemini or Claude to function. Would you like to configure them now?',
+            'GFactor requires an API key for Claude to function. Would you like to configure it now?',
             configureNow
         );
 
         if (response === configureNow) {
-            await configureApiKeys(context);
+            logMessage('Opening API key configuration panel');
+            // Show the sidebar view instead
+            vscode.commands.executeCommand('workbench.view.extension.gfactor-sidebar');
         }
     }
 }
 
-// Configure API keys
-async function configureApiKeys(_context: vscode.ExtensionContext): Promise<void> {
-    const config = vscode.workspace.getConfiguration('gfactor');
-    
-    // Ask which LLM to configure
-    const llmOptions = ['Gemini', 'Claude'];
-    const selectedLlm = await vscode.window.showQuickPick(llmOptions, {
-        placeHolder: 'Select which LLM to configure'
-    });
-
-    if (!selectedLlm) {
-        return;
-    }
-
-    // Ask for API key
-    const apiKey = await vscode.window.showInputBox({
-        prompt: `Enter your ${selectedLlm} API key`,
-        password: true
-    });
-
-    if (!apiKey) {
-        return;
-    }
-
-    // Save API key to configuration
-    if (selectedLlm === 'Gemini') {
-        await config.update('geminiApiKey', apiKey, vscode.ConfigurationTarget.Global);
-        await config.update('preferredLlm', 'gemini', vscode.ConfigurationTarget.Global);
-    } else {
-        await config.update('claudeApiKey', apiKey, vscode.ConfigurationTarget.Global);
-        await config.update('preferredLlm', 'claude', vscode.ConfigurationTarget.Global);
-    }
-
-    vscode.window.showInformationMessage(`${selectedLlm} API key configured successfully!`);
-}
-
-// Start the refactoring process
-async function startRefactor(_context: vscode.ExtensionContext): Promise<void> {
-    // Check if we have a workspace folder
-    if (!vscode.workspace.workspaceFolders || vscode.workspace.workspaceFolders.length === 0) {
-        vscode.window.showErrorMessage('GFactor requires an open workspace folder to function.');
-        return;
-    }
-
-    // Check if API keys are configured
-    const config = vscode.workspace.getConfiguration('gfactor');
-    const geminiApiKey = config.get<string>('geminiApiKey');
-    const claudeApiKey = config.get<string>('claudeApiKey');
-    const preferredLlm = config.get<string>('preferredLlm');
-
-    if (!geminiApiKey && !claudeApiKey) {
-        vscode.window.showErrorMessage('GFactor requires API keys for Gemini or Claude to function. Please configure them first.');
-        return;
-    }
-
-    // Determine which LLM to use
-    let llmConfig: LlmConfig;
-    if (preferredLlm === 'gemini' && geminiApiKey) {
-        llmConfig = { type: 'gemini', apiKey: geminiApiKey };
-    } else if (preferredLlm === 'claude' && claudeApiKey) {
-        llmConfig = { type: 'claude', apiKey: claudeApiKey };
-    } else if (geminiApiKey) {
-        llmConfig = { type: 'gemini', apiKey: geminiApiKey };
-    } else {
-        llmConfig = { type: 'claude', apiKey: claudeApiKey! };
-    }
-
-    // Show the refactoring form
-    const formData = await showRefactorForm();
-    if (!formData) {
-        return;
-    }
-
-    // Collect context from .mdc files
-    const mdcContext = await collectMdcContext();
-
-    // Start the refactoring process
-    await performRefactoring(formData, llmConfig, mdcContext);
-}
-
-// Show the refactoring form
-async function showRefactorForm(): Promise<RefactorFormData | undefined> {
-    // Create a webview panel for the form
-    const panel = vscode.window.createWebviewPanel(
-        'gfactorForm',
-        'GFactor: Code Migration Form',
-        vscode.ViewColumn.One,
-        {
-            enableScripts: true
-        }
-    );
-
-    // Set the HTML content for the form
-    panel.webview.html = getRefactorFormHtml();
-
-    // Handle form submission
-    return new Promise<RefactorFormData | undefined>((resolve) => {
-        panel.webview.onDidReceiveMessage(
-            message => {
-                if (message.command === 'submitForm') {
-                    resolve(message.data);
-                    panel.dispose();
-                } else if (message.command === 'cancel') {
-                    resolve(undefined);
-                    panel.dispose();
-                }
-            },
-            undefined,
-            []
-        );
-    });
-}
-
-// Get the HTML for the refactoring form
-function getRefactorFormHtml(): string {
-    return `<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>GFactor: Code Migration Form</title>
-    <style>
-        body {
-            font-family: var(--vscode-font-family);
-            padding: 20px;
-            color: var(--vscode-foreground);
-        }
-        .form-group {
-            margin-bottom: 15px;
-        }
-        label {
-            display: block;
-            margin-bottom: 5px;
-            font-weight: bold;
-        }
-        input[type="text"], textarea {
-            width: 100%;
-            padding: 8px;
-            box-sizing: border-box;
-            background-color: var(--vscode-input-background);
-            color: var(--vscode-input-foreground);
-            border: 1px solid var(--vscode-input-border);
-        }
-        textarea {
-            min-height: 80px;
-            resize: vertical;
-        }
-        .radio-group {
-            margin-top: 5px;
-        }
-        .radio-option {
-            margin-bottom: 5px;
-        }
-        button {
-            padding: 8px 16px;
-            margin-right: 10px;
-            background-color: var(--vscode-button-background);
-            color: var(--vscode-button-foreground);
-            border: none;
-            cursor: pointer;
-        }
-        button:hover {
-            background-color: var(--vscode-button-hoverBackground);
-        }
-        .cancel-button {
-            background-color: var(--vscode-button-secondaryBackground);
-            color: var(--vscode-button-secondaryForeground);
-        }
-        .cancel-button:hover {
-            background-color: var(--vscode-button-secondaryHoverBackground);
-        }
-    </style>
-</head>
-<body>
-    <h1>GFactor: Code Migration Form</h1>
-    <p>Configure your code migration settings below:</p>
-    
-    <form id="refactorForm">
-        <div class="form-group">
-            <label for="compilerLinterCommand">How to run the compiler/linter:</label>
-            <input type="text" id="compilerLinterCommand" name="compilerLinterCommand" placeholder="e.g., npm run lint" required>
-        </div>
-        
-        <div class="form-group">
-            <label for="testCommand">How to run the tests:</label>
-            <input type="text" id="testCommand" name="testCommand" placeholder="e.g., npm test" required>
-        </div>
-        
-        <div class="form-group">
-            <label for="filePatterns">What file patterns to investigate:</label>
-            <input type="text" id="filePatterns" name="filePatterns" placeholder="e.g., src/**/*.ts" required>
-        </div>
-        
-        <div class="form-group">
-            <label for="findPattern">How to find the pattern to migrate away from:</label>
-            <textarea id="findPattern" name="findPattern" placeholder="Describe the pattern to find (can include code examples)" required></textarea>
-        </div>
-        
-        <div class="form-group">
-            <label for="replacePattern">How to fix or replace the pattern:</label>
-            <textarea id="replacePattern" name="replacePattern" placeholder="Describe how to fix or replace the pattern (can include code examples)" required></textarea>
-        </div>
-        
-        <div class="form-group">
-            <label>Stop option:</label>
-            <div class="radio-group">
-                <div class="radio-option">
-                    <input type="radio" id="afterEachFix" name="stopOption" value="afterEachFix" required>
-                    <label for="afterEachFix">Stop after each fix</label>
-                </div>
-                <div class="radio-option">
-                    <input type="radio" id="afterEachFile" name="stopOption" value="afterEachFile">
-                    <label for="afterEachFile">Stop after each file</label>
-                </div>
-                <div class="radio-option">
-                    <input type="radio" id="onlyWhenComplete" name="stopOption" value="onlyWhenComplete" checked>
-                    <label for="onlyWhenComplete">Stop only when complete</label>
-                </div>
-            </div>
-        </div>
-        
-        <div class="form-actions">
-            <button type="submit" id="runButton">Run</button>
-            <button type="button" id="cancelButton" class="cancel-button">Cancel</button>
-        </div>
-    </form>
-
-    <script>
-        const vscode = acquireVsCodeApi();
-        
-        document.getElementById('refactorForm').addEventListener('submit', (event) => {
-            event.preventDefault();
-            
-            const formData = {
-                compilerLinterCommand: document.getElementById('compilerLinterCommand').value,
-                testCommand: document.getElementById('testCommand').value,
-                filePatterns: document.getElementById('filePatterns').value,
-                findPattern: document.getElementById('findPattern').value,
-                replacePattern: document.getElementById('replacePattern').value,
-                stopOption: document.querySelector('input[name="stopOption"]:checked').value
-            };
-            
-            vscode.postMessage({
-                command: 'submitForm',
-                data: formData
-            });
+// Check if Claude CLI is installed
+async function checkClaudeCliInstallation(): Promise<void> {
+    try {
+        // Try to run 'claude -v' to check if it's installed
+        childProcess.exec('claude -v', (error: Error | null, stdout: string, _stderr: string) => {
+            if (error) {
+                // Claude CLI is not installed or not in PATH
+                logMessage('⚠️ WARNING: Claude CLI is required but not installed.');
+                
+                // Ask if the user wants to install it
+                const installButton = 'Install Claude CLI';
+                vscode.window.showInformationMessage(
+                    'Claude CLI is required but not installed.',
+                    installButton
+                ).then(selection => {
+                    if (selection === installButton) {
+                        logMessage('Installing Claude CLI via npm...');
+                        // Install Claude CLI
+                        const terminal = vscode.window.createTerminal('Claude CLI Installation');
+                        terminal.show();
+                        terminal.sendText('npm install -g @anthropic-ai/claude-code');
+                        
+                        // Log installation progress
+                        logMessage('Claude CLI installation started. Please wait for the installation to complete.');
+                    }
+                });
+            } else {
+                // Claude CLI is installed
+                logMessage(`Claude CLI is installed: ${stdout.trim()}`);
+            }
         });
-        
-        document.getElementById('cancelButton').addEventListener('click', () => {
-            vscode.postMessage({
-                command: 'cancel'
-            });
-        });
-    </script>
-</body>
-</html>`;
+    } catch (error) {
+        console.error('Error checking Claude CLI installation:', error);
+    }
 }
 
-// Collect context from .mdc files
-async function collectMdcContext(): Promise<string> {
-    if (!vscode.workspace.workspaceFolders || vscode.workspace.workspaceFolders.length === 0) {
-        return '';
+// Function to stop an ongoing migration
+function stopMigration(): void {
+    if (migrationCancellationTokenSource) {
+        logMessage('Migration stopped by user');
+        migrationCancellationTokenSource.cancel();
+        migrationCancellationTokenSource.dispose();
+        migrationCancellationTokenSource = undefined;
+        
+        // Notify the webview that migration is complete
+        if (sidebarWebview) {
+            // Add a small delay to ensure the UI updates properly
+            setTimeout(() => {
+                logMessage('🔴 CANCEL BUTTON: Migration stopped, hiding cancel button 🔴');
+                sidebarWebview?.postMessage({
+                    command: 'migrationComplete'
+                });
+            }, 500);
+        }
+        
+        logMessage('Migration stopped by user - operation cancelled');
     }
+}
 
-    const workspaceRoot = vscode.workspace.workspaceFolders[0].uri.fsPath;
-    const mdcFiles = await glob.glob('**/*.mdc', { cwd: workspaceRoot });
-    
-    let context = '';
-    const md = MarkdownIt.default();
-    
-    for (const file of mdcFiles) {
+// Run refactoring with provided form data
+async function runRefactorWithData(formData: RefactorFormData): Promise<void> {
+    try {
+        // Clear logs at the beginning of a new migration run
+        clearLogs();
+        
+        // Reset the in-memory log array
+        logMessages = [];
+        
+        // Clear logs from extension context
+        const context = getExtensionContext();
+        context.globalState.update(LOG_STORAGE_KEY, []);
+        
+        // Check if we have a workspace folder
+        if (!vscode.workspace.workspaceFolders || vscode.workspace.workspaceFolders.length === 0) {
+            logMessage('⚠️ ERROR: GFactor requires an open workspace folder to function.');
+            return;
+        }
+
+        // Check if API keys are configured
+        const llmConfig = getLlmConfig();
+        if (!llmConfig) {
+            logMessage('⚠️ ERROR: GFactor requires an API key for Claude to function. Please configure it first.');
+            return;
+        }
+
+        // Create a new cancellation token source
+        if (migrationCancellationTokenSource) {
+            migrationCancellationTokenSource.dispose();
+        }
+        migrationCancellationTokenSource = new vscode.CancellationTokenSource();
+
+        // Collect context from .mdc files
+        const mdcContext = await collectMdcContext();
+
+        // Handle different actions based on button clicked
         try {
-            const filePath = path.join(workspaceRoot, file);
-            const content = fs.readFileSync(filePath, 'utf8');
-            const plainText = md.render(content);
-            context += `# ${file}\n${plainText}\n\n`;
-        } catch (error) {
-            console.error(`Error reading .mdc file ${file}:`, error);
-        }
-    }
-    
-    return context;
-}
-
-// Perform the refactoring process
-async function performRefactoring(
-    formData: RefactorFormData,
-    llmConfig: LlmConfig,
-    mdcContext: string
-): Promise<void> {
-    // Reset pattern occurrences for new refactoring session
-    patternOccurrences = [];
-    
-    // Show progress
-    vscode.window.withProgress(
-        {
-            location: vscode.ProgressLocation.Notification,
-            title: 'GFactor: Performing code migration',
-            cancellable: true
-        },
-        async (progress, token) => {
-            try {
-                // Find files matching the pattern
-                const workspaceRoot = vscode.workspace.workspaceFolders![0].uri.fsPath;
-                const files = await glob.glob(formData.filePatterns, { cwd: workspaceRoot });
-                
-                if (files.length === 0) {
-                    vscode.window.showWarningMessage('No files found matching the specified pattern.');
-                    return;
-                }
-                
-                progress.report({ message: `Found ${files.length} files to process` });
-                
-                // Count initial pattern occurrences across all files
-                let totalInitialPatternCount = 0;
-                for (const file of files) {
-                    const filePath = path.join(workspaceRoot, file);
-                    const content = fs.readFileSync(filePath, 'utf8');
-                    const patternCount = countPatternOccurrences(content, formData.findPattern);
-                    totalInitialPatternCount += patternCount;
-                }
-                
-                // Record initial pattern count
-                if (totalInitialPatternCount > 0) {
-                    patternOccurrences.push({
-                        timestamp: new Date(),
-                        count: totalInitialPatternCount
-                    });
-                }
-                
-                // Process each file
-                for (let i = 0; i < files.length; i++) {
-                    if (token.isCancellationRequested) {
-                        break;
-                    }
-                    
-                    const file = files[i];
-                    const filePath = path.join(workspaceRoot, file);
-                    
-                    progress.report({
-                        message: `Processing file ${i + 1}/${files.length}: ${file}`,
-                        increment: (1 / files.length) * 100
-                    });
-                    
-                    // Read file content
-                    const content = fs.readFileSync(filePath, 'utf8');
-                    
-                    // Count pattern occurrences in this file
-                    const initialPatternCount = countPatternOccurrences(content, formData.findPattern);
-                    
-                    // Skip if no patterns found
-                    if (initialPatternCount === 0) {
-                        continue;
-                    }
-                    
-                    // Process the file with the LLM
-                    const updatedContent = await processWithLlm(
-                        content,
-                        file,
-                        formData,
-                        llmConfig,
-                        mdcContext
-                    );
-                    
-                    if (!updatedContent || updatedContent === content) {
-                        continue;
-                    }
-                    
-                    // Count remaining patterns after refactoring
-                    const remainingPatternCount = countPatternOccurrences(updatedContent, formData.findPattern);
-                    const patternsFixed = initialPatternCount - remainingPatternCount;
-                    
-                    // Write the updated content back to the file
-                    fs.writeFileSync(filePath, updatedContent, 'utf8');
-                    
-                    // Run compiler/linter
-                    const linterResult = await runCommand(formData.compilerLinterCommand, workspaceRoot);
-                    if (!linterResult.success) {
-                        // If linter fails, revert the change
-                        fs.writeFileSync(filePath, content, 'utf8');
-                        
-                        if (formData.stopOption === 'afterEachFix' || formData.stopOption === 'afterEachFile') {
-                            const tryAgain = await vscode.window.showErrorMessage(
-                                `Linter failed for file ${file}. Changes have been reverted.`,
-                                'Try Again',
-                                'Skip File',
-                                'Stop Migration'
-                            );
-                            
-                            if (tryAgain === 'Try Again') {
-                                i--; // Process the same file again
-                                continue;
-                            } else if (tryAgain === 'Stop Migration') {
-                                break;
-                            }
-                            // If 'Skip File', continue to the next file
-                        }
-                        
-                        continue;
-                    }
-                    
-                    // Run tests
-                    const testResult = await runCommand(formData.testCommand, workspaceRoot);
-                    if (!testResult.success) {
-                        // If tests fail, revert the change
-                        fs.writeFileSync(filePath, content, 'utf8');
-                        
-                        if (formData.stopOption === 'afterEachFix' || formData.stopOption === 'afterEachFile') {
-                            const tryAgain = await vscode.window.showErrorMessage(
-                                `Tests failed for file ${file}. Changes have been reverted.`,
-                                'Try Again',
-                                'Skip File',
-                                'Stop Migration'
-                            );
-                            
-                            if (tryAgain === 'Try Again') {
-                                i--; // Process the same file again
-                                continue;
-                            } else if (tryAgain === 'Stop Migration') {
-                                break;
-                            }
-                            // If 'Skip File', continue to the next file
-                        }
-                        
-                        continue;
-                    }
-                    
-                    // Record successful pattern fixes
-                    if (patternsFixed > 0) {
-                        // Get current total count
-                        const currentTotal = patternOccurrences.length > 0
-                            ? patternOccurrences[patternOccurrences.length - 1].count
-                            : totalInitialPatternCount;
-                        
-                        patternOccurrences.push({
-                            timestamp: new Date(),
-                            count: currentTotal - patternsFixed,
-                            file: file
+            // Add a small delay after migration completes to ensure the completion message is shown
+            const delayAfterMigration = (): Promise<void> => new Promise(resolve => setTimeout(resolve, 1000));
+            
+            switch (formData.action) {
+                case 'countFiles':
+                    await migrationService.countFilesToMigrate(formData, llmConfig, mdcContext, migrationCancellationTokenSource.token);
+                    // Add delay to ensure messages are shown
+                    await delayAfterMigration();
+                    // Only notify completion for countFiles action
+                    if (sidebarWebview) {
+                        logMessage('🔴 CANCEL BUTTON: Count files completed, hiding cancel button 🔴');
+                        sidebarWebview.postMessage({
+                            command: 'migrationComplete'
                         });
                     }
-                    
-                    // If we're stopping after each file, show a message
-                    if (formData.stopOption === 'afterEachFile') {
-                        const continueRefactoring = await vscode.window.showInformationMessage(
-                            `Successfully migrated file ${file} (${i + 1}/${files.length}).`,
-                            'Continue',
-                            'Stop Migration',
-                            'Show Burndown Chart'
-                        );
-                        
-                        if (continueRefactoring === 'Stop Migration') {
-                            break;
-                        } else if (continueRefactoring === 'Show Burndown Chart') {
-                            await showBurndownChart();
-                        }
+                    break;
+                case 'migrateOneFile':
+                    // Set to process just one file
+                    formData.stopOption = 'afterEachFile';
+                    await migrationService.performRefactoring(formData, llmConfig, mdcContext, migrationCancellationTokenSource.token);
+                    // Add delay to ensure completion message is shown
+                    await delayAfterMigration();
+                    // Notify completion after migration is done
+                    if (sidebarWebview) {
+                        logMessage('🔴 CANCEL BUTTON: Migrate one file completed, hiding cancel button 🔴');
+                        sidebarWebview.postMessage({
+                            command: 'migrationComplete'
+                        });
                     }
-                }
-                
-                // Show completion message with option to view burndown chart
-                const viewChart = await vscode.window.showInformationMessage(
-                    'Code migration completed successfully!',
-                    'Show Burndown Chart'
-                );
-                
-                if (viewChart === 'Show Burndown Chart') {
-                    await showBurndownChart();
-                }
-            } catch (error) {
-                console.error('Error during refactoring:', error);
-                vscode.window.showErrorMessage(`Error during code migration: ${error}`);
+                    break;
+                case 'migrateAllFiles':
+                    // Set to process all files
+                    formData.stopOption = 'onlyWhenComplete';
+                    await migrationService.performRefactoring(formData, llmConfig, mdcContext, migrationCancellationTokenSource.token);
+                    // Add delay to ensure completion message is shown
+                    await delayAfterMigration();
+                    // Notify completion after migration is done
+                    if (sidebarWebview) {
+                        logMessage('🔴 CANCEL BUTTON: Migrate all files completed, hiding cancel button 🔴');
+                        sidebarWebview.postMessage({
+                            command: 'migrationComplete'
+                        });
+                    }
+                    break;
+                default:
+                    // Fallback to normal refactoring
+                    await migrationService.performRefactoring(formData, llmConfig, mdcContext, migrationCancellationTokenSource.token);
+                    // Add delay to ensure completion message is shown
+                    await delayAfterMigration();
+                    // Notify completion after migration is done
+                    if (sidebarWebview) {
+                        logMessage('🔴 CANCEL BUTTON: Migration completed, hiding cancel button 🔴');
+                        sidebarWebview.postMessage({
+                            command: 'migrationComplete'
+                        });
+                    }
+            }
+        } finally {
+            // Clean up the cancellation token source only if it wasn't already disposed
+            if (migrationCancellationTokenSource && !migrationCancellationTokenSource.token.isCancellationRequested) {
+                migrationCancellationTokenSource.dispose();
+                migrationCancellationTokenSource = undefined;
             }
         }
-    );
+    } catch (error) {
+        logMessage(`Error in runRefactorWithData: ${error}`);
+        
+        // Ensure UI is reset even if there's an error
+        if (sidebarWebview) {
+            logMessage('🔴 CANCEL BUTTON: Error occurred, hiding cancel button 🔴');
+            sidebarWebview.postMessage({
+                command: 'migrationComplete'
+            });
+        }
+    }
 }
 
-// Count pattern occurrences in content
-function countPatternOccurrences(content: string, pattern: string): number {
-    // Simple implementation - in a real-world scenario, this would be more sophisticated
-    // and would use regex or the LLM to count actual pattern instances
-    const regex = new RegExp(pattern, 'g');
-    const matches = content.match(regex);
-    return matches ? matches.length : 0;
+// Get the extension context
+function getExtensionContext(): vscode.ExtensionContext {
+    if (!extensionContext) {
+        throw new Error('Extension context not initialized');
+    }
+    return extensionContext;
 }
 
 // Show burndown chart
 async function showBurndownChart(): Promise<void> {
+    logMessage('Generating burndown chart...');
+    
+    // Get pattern occurrences from migration service
+    const occurrences = migrationService.getPatternOccurrences();
+    
     // If no data, show a message
-    if (patternOccurrences.length === 0) {
-        vscode.window.showInformationMessage('No pattern occurrence data available. Run a refactoring first.');
+    if (occurrences.length === 0) {
+        const message = 'No pattern occurrence data available. Run a refactoring first.';
+        logMessage(message);
         return;
     }
+    
+    logMessage(`Creating burndown chart with ${occurrences.length} data points`);
     
     // Create a webview panel for the chart
     const panel = vscode.window.createWebviewPanel(
@@ -581,277 +479,8 @@ async function showBurndownChart(): Promise<void> {
     );
     
     // Set the HTML content for the chart
-    panel.webview.html = getBurndownChartHtml(patternOccurrences);
+    panel.webview.html = getBurndownChartHtml(occurrences);
+    logMessage('Burndown chart displayed');
 }
 
-// Get HTML for burndown chart
-function getBurndownChartHtml(occurrences: PatternOccurrence[]): string {
-    // Format data for the chart
-    const chartData = occurrences.map((occurrence, index) => {
-        return {
-            index,
-            timestamp: occurrence.timestamp.toLocaleTimeString(),
-            count: occurrence.count,
-            file: occurrence.file || 'Initial scan'
-        };
-    });
-    
-    // Calculate chart dimensions
-    const chartWidth = 800;
-    const chartHeight = 400;
-    const paddingLeft = 50;
-    const paddingRight = 20;
-    const paddingTop = 20;
-    const paddingBottom = 50;
-    const graphWidth = chartWidth - paddingLeft - paddingRight;
-    const graphHeight = chartHeight - paddingTop - paddingBottom;
-    
-    // Calculate scales
-    const maxCount = Math.max(...occurrences.map(o => o.count));
-    const yScale = graphHeight / maxCount;
-    const xScale = graphWidth / (occurrences.length - 1 || 1);
-    
-    // Generate SVG path for the line
-    let pathData = '';
-    occurrences.forEach((occurrence, i) => {
-        const x = paddingLeft + i * xScale;
-        const y = paddingTop + graphHeight - (occurrence.count * yScale);
-        if (i === 0) {
-            pathData += `M ${x} ${y}`;
-        } else {
-            pathData += ` L ${x} ${y}`;
-        }
-    });
-    
-    // Generate HTML with embedded SVG chart
-    return `<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>GFactor: Pattern Burndown Chart</title>
-    <style>
-        body {
-            font-family: var(--vscode-font-family);
-            padding: 20px;
-            color: var(--vscode-foreground);
-        }
-        h1 {
-            margin-bottom: 20px;
-        }
-        .chart-container {
-            margin-top: 20px;
-        }
-        .chart-svg {
-            background-color: var(--vscode-editor-background);
-            border: 1px solid var(--vscode-panel-border);
-        }
-        .axis-line {
-            stroke: var(--vscode-panel-border);
-            stroke-width: 1;
-        }
-        .chart-line {
-            stroke: var(--vscode-charts-blue);
-            stroke-width: 2;
-            fill: none;
-        }
-        .chart-point {
-            fill: var(--vscode-charts-blue);
-        }
-        .chart-label {
-            font-size: 12px;
-            fill: var(--vscode-foreground);
-        }
-        .axis-label {
-            font-size: 14px;
-            fill: var(--vscode-foreground);
-            text-anchor: middle;
-        }
-        .data-table {
-            margin-top: 30px;
-            width: 100%;
-            border-collapse: collapse;
-        }
-        .data-table th, .data-table td {
-            padding: 8px;
-            text-align: left;
-            border-bottom: 1px solid var(--vscode-panel-border);
-        }
-        .data-table th {
-            background-color: var(--vscode-editor-background);
-        }
-    </style>
-</head>
-<body>
-    <h1>Pattern Burndown Chart</h1>
-    <p>This chart shows the number of old patterns remaining over time during the refactoring process.</p>
-    
-    <div class="chart-container">
-        <svg class="chart-svg" width="${chartWidth}" height="${chartHeight}">
-            <!-- Y-axis -->
-            <line class="axis-line" x1="${paddingLeft}" y1="${paddingTop}" x2="${paddingLeft}" y2="${paddingTop + graphHeight}"></line>
-            
-            <!-- X-axis -->
-            <line class="axis-line" x1="${paddingLeft}" y1="${paddingTop + graphHeight}" x2="${paddingLeft + graphWidth}" y2="${paddingTop + graphHeight}"></line>
-            
-            <!-- Y-axis labels -->
-            ${Array.from({length: 5}, (_, i) => {
-                const value = Math.round(maxCount * (4 - i) / 4);
-                const y = paddingTop + i * (graphHeight / 4);
-                return `<text class="chart-label" x="${paddingLeft - 10}" y="${y + 5}" text-anchor="end">${value}</text>`;
-            }).join('')}
-            
-            <!-- X-axis labels -->
-            ${chartData.map((_data, i) => {
-                const x = paddingLeft + i * xScale;
-                return `<text class="chart-label" x="${x}" y="${paddingTop + graphHeight + 20}" text-anchor="middle">${i + 1}</text>`;
-            }).join('')}
-            
-            <!-- Axis titles -->
-            <text class="axis-label" x="${paddingLeft - 35}" y="${paddingTop + graphHeight / 2}" transform="rotate(-90, ${paddingLeft - 35}, ${paddingTop + graphHeight / 2})">Patterns Remaining</text>
-            <text class="axis-label" x="${paddingLeft + graphWidth / 2}" y="${paddingTop + graphHeight + 40}">Refactoring Steps</text>
-            
-            <!-- Chart line -->
-            <path class="chart-line" d="${pathData}"></path>
-            
-            <!-- Data points -->
-            ${chartData.map(data => {
-                const x = paddingLeft + data.index * xScale;
-                const y = paddingTop + graphHeight - (data.count * yScale);
-                return `<circle class="chart-point" cx="${x}" cy="${y}" r="4"></circle>`;
-            }).join('')}
-        </svg>
-    </div>
-    
-    <table class="data-table">
-        <thead>
-            <tr>
-                <th>Step</th>
-                <th>Time</th>
-                <th>File</th>
-                <th>Patterns Remaining</th>
-            </tr>
-        </thead>
-        <tbody>
-            ${chartData.map(data => `
-                <tr>
-                    <td>${data.index + 1}</td>
-                    <td>${data.timestamp}</td>
-                    <td>${data.file}</td>
-                    <td>${data.count}</td>
-                </tr>
-            `).join('')}
-        </tbody>
-    </table>
-</body>
-</html>`;
-}
-
-// Check if content contains the pattern to refactor (currently unused but kept for future use)
-// function containsPattern(content: string, pattern: string): boolean {
-//     // This is a simple check - in a real implementation, this would be more sophisticated
-//     // and would use the LLM to determine if the pattern exists
-//     return content.includes(pattern);
-// }
-
-// Process the file content with the LLM
-async function processWithLlm(
-    content: string,
-    filePath: string,
-    formData: RefactorFormData,
-    llmConfig: LlmConfig,
-    mdcContext: string
-): Promise<string | null> {
-    try {
-        // Prepare the prompt for the LLM
-        const prompt = `
-You are an expert code refactoring assistant. Your task is to migrate code from one pattern to another.
-
-# Context from .mdc files:
-${mdcContext || 'No .mdc files found in the project.'}
-
-# File to refactor:
-${filePath}
-
-# Current content:
-\`\`\`
-${content}
-\`\`\`
-
-# Pattern to find:
-${formData.findPattern}
-
-# How to replace:
-${formData.replacePattern}
-
-Please refactor the code according to the specified pattern. Return ONLY the refactored code without any explanations or markdown formatting.
-`;
-
-        // Process with the appropriate LLM
-        if (llmConfig.type === 'gemini') {
-            return await processWithGemini(prompt, llmConfig.apiKey);
-        } else {
-            return await processWithClaude(prompt, llmConfig.apiKey);
-        }
-    } catch (error) {
-        console.error('Error processing with LLM:', error);
-        vscode.window.showErrorMessage(`Error processing with LLM: ${error}`);
-        return null;
-    }
-}
-
-// Process with Google's Gemini
-async function processWithGemini(prompt: string, apiKey: string): Promise<string | null> {
-    try {
-        const genAI = new GoogleGenerativeAI(apiKey);
-        const model = genAI.getGenerativeModel({ model: 'gemini-pro' });
-        
-        const result = await model.generateContent(prompt);
-        const response = result.response;
-        return response.text();
-    } catch (error) {
-        console.error('Error with Gemini API:', error);
-        throw error;
-    }
-}
-
-// Process with Anthropic's Claude
-async function processWithClaude(prompt: string, apiKey: string): Promise<string | null> {
-    try {
-        const anthropic = new Anthropic({
-            apiKey: apiKey
-        });
-        
-        const message = await anthropic.messages.create({
-            model: 'claude-3-opus-20240229',
-            max_tokens: 4000,
-            messages: [
-                {
-                    role: 'user',
-                    content: prompt
-                }
-            ]
-        });
-        
-        if (message.content[0].type === 'text') {
-            return message.content[0].text;
-        }
-        return null;
-    } catch (error) {
-        console.error('Error with Claude API:', error);
-        throw error;
-    }
-}
-
-// Run a command and return the result
-async function runCommand(command: string, cwd: string): Promise<{ success: boolean; output: string }> {
-    return new Promise((resolve) => {
-        childProcess.exec(command, { cwd }, (error, stdout, stderr) => {
-            if (error) {
-                resolve({ success: false, output: stderr || stdout });
-            } else {
-                resolve({ success: true, output: stdout });
-            }
-        });
-    });
-}
+// The getBurndownChartHtml function has been moved to html-generator.ts

@@ -2,8 +2,9 @@
   "name": "gfactor",
   "displayName": "GFactor",
   "description": "AI-powered codebase migration tool for large-scale refactoring",
-  "version": "0.0.1",
+  "version": "0.0.56",
   "publisher": "cainus",
+  "icon": "resources/gfactor-icon.png",
   "repository": {
     "type": "git",
     "url": "https://github.com/cainus/gfactor"
@@ -18,7 +19,10 @@
     "Formatters"
   ],
   "activationEvents": [
-    "onStartupFinished"
+    "onStartupFinished",
+    "onCommand:gfactor.startRefactor",
+    "onCommand:gfactor.configureApiKeys",
+    "onCommand:gfactor.showBurndownChart"
   ],
   "main": "./dist/extension.js",
   "contributes": {
@@ -36,34 +40,43 @@
         "title": "GFactor: Show Pattern Burndown Chart"
       }
     ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "gfactor-sidebar",
+          "title": "GFactor",
+          "icon": "$(symbol-function)"
+        }
+      ]
+    },
+    "views": {
+      "gfactor-sidebar": [
+        {
+          "id": "gfactorView",
+          "name": "AI Migration Assistant",
+          "type": "webview"
+        }
+      ]
+    },
     "configuration": {
       "title": "GFactor",
       "properties": {
-        "gfactor.geminiApiKey": {
-          "type": "string",
-          "default": "",
-          "description": "API key for Google Gemini"
-        },
         "gfactor.claudeApiKey": {
           "type": "string",
           "default": "",
-          "description": "API key for Anthropic Claude"
-        },
-        "gfactor.preferredLlm": {
-          "type": "string",
-          "enum": [
-            "gemini",
-            "claude"
-          ],
-          "default": "gemini",
-          "description": "Preferred LLM to use for code migration"
+          "description": "API key for Claude CLI (not used directly, but kept for backward compatibility)"
         }
       }
     }
   },
+  "files": [
+    "dist/**/*",
+    "resources/**/*",
+    "timestamp.txt"
+  ],
   "scripts": {
     "vscode:prepublish": "npm run package",
-    "compile": "npm run check-types && npm run lint && node esbuild.js",
+    "compile": "npm run check-types && npm run lint && npm run timestamp && node esbuild.js",
     "watch": "npm-run-all -p watch:*",
     "watch:esbuild": "node esbuild.js --watch",
     "watch:tsc": "tsc --noEmit --watch --project tsconfig.json",
@@ -73,7 +86,13 @@
     "pretest": "npm run compile-tests && npm run compile && npm run lint",
     "check-types": "tsc --noEmit",
     "lint": "eslint src",
-    "test": "vscode-test"
+    "test": "vscode-test",
+    "timestamp": "date -u -Iseconds > timestamp.txt",
+    "version:bump": "node scripts/version.js patch",
+    "version:bump:major": "node scripts/version.js major",
+    "version:bump:minor": "node scripts/version.js minor",
+    "version:bump:patch": "node scripts/version.js patch",
+    "deploy": "rm -f *.vsix && npm run version:bump:patch && npm run package && npx vsce package"
   },
   "keywords": [
     "vscode",
@@ -100,9 +119,15 @@
     "typescript-eslint": "^8.33.1"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.53.0",
-    "@google/generative-ai": "^0.24.1",
+    "@types/react": "^19.1.8",
+    "@types/react-dom": "^19.1.6",
+    "canvas": "^3.1.0",
+    "execa": "^9.1.0",
     "glob": "^10.4.5",
-    "markdown-it": "^14.1.0"
+    "markdown-it": "^14.1.0",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "stream-json": "^1.9.1",
+    "zod": "^3.25.67"
   }
 }

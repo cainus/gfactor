@@ -1,0 +1,8 @@
+<svg width="24" height="24" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+  <!-- Italicized g -->
+  <path fill="currentColor" d="M10,7 C8.5,7 7,8 7,10 C7,12 8.5,13 10,13 L10,15 C10,16 11,17 12,17 L15,17 L15,15 L12,15 L12,13 C13.5,13 15,12 15,10 C15,8 13.5,7 12,7 L10,7 Z" />
+  <!-- Left parenthesis -->
+  <path fill="currentColor" d="M16,7 C16.5,9 16.5,15 16,17" stroke="currentColor" stroke-width="1.5" fill="none" />
+  <!-- Right parenthesis -->
+  <path fill="currentColor" d="M18,7 C17.5,9 17.5,15 18,17" stroke="currentColor" stroke-width="1.5" fill="none" />
+</svg>

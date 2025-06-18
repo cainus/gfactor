@@ -1,0 +1,19 @@
+For the view level
+* We want maximum react usage
+* We want minimal programmatic dom manipulation
+* we want minimal html in strings
+
+
+To verify changes:
+
+npm run lint && npm run check-types && npm run compile
+
+To create a package:
+
+npm run deploy
+
+
+Make sure to verify changes and create a package after every change.
+
+
+
