@@ -13,7 +13,6 @@ interface SidebarProps {
   displayState: { apiKeysForm: boolean };
   hasClaudeKey: boolean;
   packageVersion: string;
-  timestampContent: string;
   iconUri?: string;
 }
 
@@ -23,14 +22,12 @@ export const Sidebar: React.FC<SidebarProps> = ({
   displayState,
   hasClaudeKey,
   packageVersion,
-  timestampContent,
   iconUri
 }) => {
   return (
     <div style={styles.body}>
       <Header
         packageVersion={packageVersion}
-        timestampContent={timestampContent}
         extensionUri={extensionUri}
         iconUri={iconUri}
       />
@@ -51,9 +48,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
       
       <RefactorForm savedFormData={savedFormData} />
       
-      <LogWindow 
-        packageVersion={packageVersion} 
-        timestampContent={timestampContent} 
+      <LogWindow
+        packageVersion={packageVersion}
       />
       
       {/* Script tag will be added by the HTML generator */}

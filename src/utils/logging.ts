@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import * as childProcess from 'child_process';
+import { ClaudeResponse } from './claude';
 
 // Output channel for logging
 let outputChannel: vscode.OutputChannel;
@@ -32,6 +33,32 @@ export function clearLogs(): void {
     });
   }
 }
+
+export function jsonLogMessage(json: ClaudeResponse): void {
+  console.log('LOGGING:', json);
+  const jsonStr = JSON.stringify(json, null, 2);
+  
+  // Log to output channel - no timestamps
+  if (outputChannel) {
+    outputChannel.appendLine(jsonStr);
+  }
+  
+  // Log to webview if available
+  if (sidebarWebview) {
+    try {
+      // Send the actual log message
+      sidebarWebview.postMessage({
+        command: 'log',
+        message: json
+      });
+    } catch (error) {
+      console.error('ERROR SENDING TO WEBVIEW:', error);
+    }
+  } else {
+    console.log('WEBVIEW NOT AVAILABLE');
+  }
+}
+
 
 // Log message to console, output channel, and webview
 export function logMessage(message: string): void {

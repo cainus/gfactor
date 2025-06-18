@@ -2,7 +2,7 @@
   "name": "gfactor",
   "displayName": "GFactor",
   "description": "AI-powered codebase migration tool for large-scale refactoring",
-  "version": "0.0.52",
+  "version": "0.0.56",
   "publisher": "cainus",
   "icon": "resources/gfactor-icon.png",
   "repository": {
@@ -127,6 +127,7 @@
     "markdown-it": "^14.1.0",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
-    "stream-json": "^1.9.1"
+    "stream-json": "^1.9.1",
+    "zod": "^3.25.67"
   }
 }

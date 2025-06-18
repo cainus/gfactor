@@ -28,47 +28,6 @@ export function getSidebarHtml(
         console.error('Error reading package.json:', error);
     }
     
-    // Read timestamp from file
-    let timestampContent = "[missing timestamp]";
-    try {
-        // Try multiple locations for timestamp.txt
-        
-        // First try: workspace folder
-        if (vscode.workspace.workspaceFolders && vscode.workspace.workspaceFolders.length > 0) {
-            try {
-                const workspaceTimestampPath = path.join(vscode.workspace.workspaceFolders[0].uri.fsPath, 'timestamp.txt');
-                timestampContent = fs.readFileSync(workspaceTimestampPath, 'utf8').trim();
-                console.log('Found timestamp.txt in workspace folder (HTML generation)');
-            } catch {
-                // Workspace folder failed, continue to next location
-            }
-        }
-        
-        // Second try: extension directory
-        if (timestampContent === "[missing timestamp]") {
-            try {
-                const extensionTimestampPath = path.join(extensionUri.fsPath, 'timestamp.txt');
-                timestampContent = fs.readFileSync(extensionTimestampPath, 'utf8').trim();
-                console.log('Found timestamp.txt in extension directory (HTML generation)');
-            } catch {
-                // Extension directory failed, continue to next location
-            }
-        }
-        
-        // Third try: dist directory
-        if (timestampContent === "[missing timestamp]") {
-            try {
-                const distTimestampPath = path.join(extensionUri.fsPath, 'dist', 'timestamp.txt');
-                timestampContent = fs.readFileSync(distTimestampPath, 'utf8').trim();
-                console.log('Found timestamp.txt in dist directory (HTML generation)');
-            } catch {
-                // Dist directory failed, use default
-            }
-        }
-    } catch (error) {
-        console.error('Error reading timestamp file:', error);
-    }
-    
     // Create the resource URI for the icon
     const iconUri = webview.asWebviewUri(vscode.Uri.joinPath(extensionUri, 'resources', 'gfactor-icon.png')).toString();
     
@@ -79,7 +38,6 @@ export function getSidebarHtml(
         displayState,
         hasClaudeKey,
         packageVersion,
-        timestampContent,
         iconUri
     });
     
@@ -95,7 +53,7 @@ export function getSidebarHtml(
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>GFactor AI Migration Assistant - ${timestampContent}</title>
+    <title>GFactor AI Migration Assistant</title>
     <script src="https://unpkg.com/react@17/umd/react.production.min.js"></script>
     <script src="https://unpkg.com/react-dom@17/umd/react-dom.production.min.js"></script>
 </head>

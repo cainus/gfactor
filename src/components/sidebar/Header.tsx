@@ -4,14 +4,12 @@ import { styles } from '../styles';
 
 interface HeaderProps {
   packageVersion: string;
-  timestampContent: string;
   extensionUri: vscode.Uri;
   iconUri?: string;
 }
 
 export const Header: React.FC<HeaderProps> = ({
   packageVersion,
-  timestampContent,
   extensionUri,
   iconUri
 }) => {
@@ -26,7 +24,7 @@ export const Header: React.FC<HeaderProps> = ({
       />
       <div>
         <h2 style={styles.headerText}>GFactor AI Migration</h2>
-        <div style={styles.headerVersion}>v{packageVersion} | {timestampContent}</div>
+        <div style={styles.headerVersion}>v{packageVersion}</div>
       </div>
     </div>
   );

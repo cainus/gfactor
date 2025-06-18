@@ -1,15 +1,17 @@
 import * as React from 'react';
+import { AssistantMessageFormatter } from './AssistantMessageFormatter';
 
 interface LogWindowProps {
   packageVersion: string;
-  timestampContent: string;
 }
 
 export const LogWindow: React.FC<LogWindowProps> = ({
-  packageVersion,
-  timestampContent
+  packageVersion
 }) => {
   console.log('LOGWINDOW: Rendering LogWindow component');
+  
+  // State to store log messages
+  const [logs, setLogs] = React.useState<string[]>([]);
   
   // Use a ref for the log content div
   const logContentRef = React.useRef<HTMLDivElement>(null);
@@ -34,74 +36,53 @@ export const LogWindow: React.FC<LogWindowProps> = ({
     }
   }, []);
   
-  // Add a log message directly to the DOM after component mounts
+  // Handle log messages using React state
   React.useEffect(() => {
     console.log('LOGWINDOW: Component mounted');
     
-    // Create a cleanup function that will be populated if we set up an observer
-    let cleanup: (() => void) | undefined;
-    
-    // Try to add a log message directly to the DOM
-    try {
-      if (logContentRef.current) {
-        console.log('LOGWINDOW: logContentRef is available, adding log directly');
-        const logElement = document.createElement('p');
-        logElement.textContent = 'LOG FROM USEEFFECT: Added directly to DOM at ' + new Date().toISOString();
-        logElement.style.margin = '4px 0';
-        logElement.style.color = 'var(--vscode-foreground)';
-        logContentRef.current.appendChild(logElement);
-        scrollToBottom();
-      } else {
-        console.log('LOGWINDOW: logContentRef is not available');
+    // Function to handle message events
+    const handleMessageEvent = (event: MessageEvent) => {
+      const data = event.data;
+      
+      if (data && (data.command === 'log' || data.command === 'directLog')) {
+        setLogs(prevLogs => [...prevLogs, data.message]);
+        setTimeout(scrollToBottom, 0);
+      } else if (data && data.command === 'restoreLogs' && Array.isArray(data.logs)) {
+        setLogs(data.logs);
+        setTimeout(scrollToBottom, 0);
+      } else if (data && data.command === 'clearLogs') {
+        setLogs([]);
       }
-    } catch (error) {
-      console.error('LOGWINDOW: Error adding log directly:', error);
-    }
+    };
     
-    // Try to find the logContent element by ID
-    try {
-      const logContent = document.getElementById('logContent');
-      if (logContent) {
-        console.log('LOGWINDOW: Found logContent by ID, adding log directly');
-        const logElement = document.createElement('p');
-        logElement.textContent = 'LOG FROM GETELEMENTBYID: Added directly to DOM at ' + new Date().toISOString();
-        logElement.style.margin = '4px 0';
-        logElement.style.color = 'var(--vscode-foreground)';
-        logContent.appendChild(logElement);
-        scrollToBottom();
-      } else {
-        console.log('LOGWINDOW: Could not find logContent by ID');
+    // Function to handle custom log events
+    const handleCustomLogEvent = (event: Event) => {
+      const customEvent = event as CustomEvent;
+      if (customEvent.detail && customEvent.detail.message) {
+        setLogs(prevLogs => [...prevLogs, customEvent.detail.message]);
+        setTimeout(scrollToBottom, 0);
       }
-    } catch (error) {
-      console.error('LOGWINDOW: Error finding logContent by ID:', error);
-    }
+    };
     
-    // Set up a MutationObserver to detect when logs are added and scroll to bottom
-    try {
-      const logContent = logContentRef.current || document.getElementById('logContent');
-      if (logContent) {
-        console.log('LOGWINDOW: Setting up MutationObserver');
-        const observer = new MutationObserver((mutations) => {
-          // If nodes were added, scroll to bottom
-          if (mutations.some(mutation => mutation.addedNodes.length > 0)) {
-            console.log('LOGWINDOW: Logs added, scrolling to bottom');
-            scrollToBottom();
-          }
-        });
-        
-        observer.observe(logContent, { childList: true });
-        
-        // Set the cleanup function
-        cleanup = () => {
-          observer.disconnect();
-        };
-      }
-    } catch (error) {
-      console.error('LOGWINDOW: Error setting up MutationObserver:', error);
-    }
+    // Function to handle clear logs event
+    const handleClearLogsEvent = () => {
+      setLogs([]);
+    };
     
-    // Return the cleanup function or undefined
-    return cleanup;
+    // Listen for log messages from the extension
+    window.addEventListener('message', handleMessageEvent);
+    window.addEventListener('vscode-log', handleCustomLogEvent);
+    window.addEventListener('vscode-clear-logs', handleClearLogsEvent);
+    
+    // Add initial log message
+    setLogs(['LogWindow component mounted at ' + new Date().toISOString()]);
+    
+    // Cleanup event listeners
+    return () => {
+      window.removeEventListener('message', handleMessageEvent);
+      window.removeEventListener('vscode-log', handleCustomLogEvent);
+      window.removeEventListener('vscode-clear-logs', handleClearLogsEvent);
+    };
   }, [scrollToBottom]);
   
   // Create a very simple component with hardcoded logs and an ID for direct DOM manipulation
@@ -117,7 +98,7 @@ export const LogWindow: React.FC<LogWindowProps> = ({
         marginBottom: '10px'
       }}>
         <h3 style={{ margin: 0 }}>Log Output</h3>
-        <div>v{packageVersion} | {timestampContent}</div>
+        <div>v{packageVersion}</div>
       </div>
       
       <div
@@ -131,6 +112,24 @@ export const LogWindow: React.FC<LogWindowProps> = ({
           backgroundColor: 'var(--vscode-editor-background)'
         }}
       >
+        {logs.map((log, index) => {
+          // Try to parse the log as JSON to check if it's an assistant message
+          try {
+            const parsedLog = JSON.parse(log);
+            if (parsedLog.type === 'assistant') {
+              return <AssistantMessageFormatter key={index} jsonString={log} />;
+            }
+          } catch {
+            // Not valid JSON or not an assistant message
+          }
+          
+          // Default rendering for non-assistant messages
+          return (
+            <p key={index} style={{ margin: '4px 0', color: 'var(--vscode-foreground)' }}>
+              {log}
+            </p>
+          );
+        })}
       </div>
       
     </div>

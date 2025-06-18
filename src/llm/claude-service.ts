@@ -3,7 +3,7 @@ import * as os from 'os';
 import * as path from 'path';
 import * as childProcess from 'child_process';
 import { LlmService } from './llm-types';
-import { logMessage } from '../utils/logging';
+import { jsonLogMessage, logMessage } from '../utils/logging';
 
 export class ClaudeService implements LlmService {
   // Debug flag to enable additional logging
@@ -168,7 +168,7 @@ export class ClaudeService implements LlmService {
               }
               
               // Log the raw JSON for all message types
-              logMessage(`🤖 CLAUDE JSON: ${JSON.stringify(jsonData)}`);
+              jsonLogMessage(jsonData);
               
               // Process based on the type field
               switch (jsonData.type) {
